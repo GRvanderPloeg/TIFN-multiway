@@ -1,0 +1,1995 @@
+---
+title: "makeAllFigures"
+author: "RvdP"
+date: "2023-07-31"
+output: html_document
+---
+
+## Requirements
+```{r libraries, include=FALSE}
+#library(ggplot2)
+library(ggpubr)
+#library(compositions)
+#library(viridis)
+#library(dplyr)
+#library(tidyr)
+#library(hrbrthemes)
+#library(extrafont)
+#library(showtext)
+#library(vegan)
+#library(RColorBrewer)
+#library(Polychrome)
+#library(multiway)
+#library(MatrixCorrelation)
+#library(stringr)
+#library(asbio)
+#library(stringr)
+#library(pathview)
+#library(gplots)
+library(tidyverse)
+library(ggrepel)
+library(paramGUI)
+library(pracma)
+
+source("./R scripts/summary.functions.R")
+source("./R scripts/PARAFAC_functions.R")
+source("./R scripts/heatmap.2a.R")
+set.seed(0)
+```
+
+```{r integral functionality}
+correctPARAFACloadings = function(model, modeToCorrect){
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  
+  if(modeToCorrect == 1){
+    F = kroneckercol(C, B) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Atilde = A %*% T
+    result = Atilde
+  }
+  else if(modeToCorrect == 2){
+    F = kroneckercol(A, C) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Btilde = B %*% T
+    result = Btilde
+  }
+  else if(modeToCorrect == 3){
+    F = kroneckercol(B, A) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Ctilde = C %*% T
+    result = Ctilde
+  }
+  
+  return(result)
+}
+```
+
+```{r Import red fluorescence data}
+rf_data = read.csv("./0. Raw data input/RFdata.csv")
+colnames(rf_data) = c("subject", "id", "fotonr", "day", "group", "RFgroup", "MQH", "SPS(tm)", "Area_delta_R30", "Area_delta_Rmax", "Area_delta_R30_x_Rmax", "gingiva_mean_R_over_G", "gingiva_mean_R_over_G_upper_jaw", "gingiva_mean_R_over_G_lower_jaw")
+rf_data = rf_data %>% as_tibble()
+
+rf_data[rf_data$subject == "VSTPHZ", 1] = "VSTPH2"
+rf_data[rf_data$subject == "D2VZH0", 1] = "DZVZH0"
+rf_data[rf_data$subject == "DLODNN", 1] = "DLODDN"
+rf_data[rf_data$subject == "O3VQFX", 1] = "O3VQFQ"
+rf_data[rf_data$subject == "F80LGT", 1] = "F80LGF"
+rf_data[rf_data$subject == "26QQR0", 1] = "26QQrO"
+
+rf_data2 = read.csv("./0. Raw data input/red_fluorescence_data.csv") %>% as_tibble()
+rf_data2 = rf_data2[,c(2,4,181:192)]
+rf_data = rf_data %>% left_join(rf_data2)
+
+rf = rf_data %>% select(subject, RFgroup) %>% unique()
+```
+
+```{r Import subject metadata}
+age_gender = read.csv("./0. Raw data input/20160210 demografische gegevens TIFN2.csv", sep=";")
+age_gender = age_gender[2:nrow(age_gender),2:ncol(age_gender)]
+age_gender = age_gender %>% as_tibble() %>% filter(onderzoeksgroep == 0) %>% select(naam, leeftijd, geslacht)
+colnames(age_gender) = c("subject", "age", "gender")
+
+# Correction for incorrect subject ids
+age_gender[age_gender$subject == "VSTPHZ", 1] = "VSTPH2"
+age_gender[age_gender$subject == "D2VZH0", 1] = "DZVZH0"
+age_gender[age_gender$subject == "DLODNN", 1] = "DLODDN"
+age_gender[age_gender$subject == "O3VQFX", 1] = "O3VQFQ"
+age_gender[age_gender$subject == "F80LGT", 1] = "F80LGF"
+age_gender[age_gender$subject == "26QQR0", 1] = "26QQrO"
+
+age_gender = age_gender %>% arrange(subject)
+```
+
+```{r Import microbiome data}
+microbiome.raw = read.csv("./0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+taxa = read.csv("./0. Raw data input/20221005_wp2/taxonomic-classification.tsv", sep="\t")
+selectedIndividuals = microbiome.raw %>% as_tibble() %>% filter(group == "control") %>% select(subject) %>% pull %>% unique
+```
+
+```{r Import metabolomics data}
+metabolomics.raw = read.csv("./0. Raw data input/20221005_wp2/metabolomics.tsv", sep="\t")
+metabolomics.raw.notest = metabolomics.raw %>% as_tibble() %>% filter(subject %in% selectedIndividuals)
+metabolomics.features = read.csv("./0. Raw data input/20221005_wp2/metabolomics-features.tsv", sep="\t")
+```
+
+```{r Import KO mappings}
+# Mapping of KO K-number to pathways
+KO2pathway = read.csv("./4. Functional microbiome pre-processing/kegg_ko2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(KO2pathway) = c("pathway", "KO")
+dummy = unlist(strsplit(KO2pathway["KO"] %>% pull, "ko:"))
+KO2pathway["KO"] = dummy[dummy != ""]
+
+# Mapping of pathway ID to pathway name
+pathway2name = read.csv("./4. Functional microbiome pre-processing/kegg_pathwayNames.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(pathway2name) = c("pathway", "name")
+#pathway2name2 = pathway2name
+#pathway2name2$pathway = str_replace(pathway2name$pathway, "map", "ko")
+
+# Mapping of compound to pathway
+compound2pathway = read.csv("./4. Functional microbiome pre-processing/kegg_compound2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(compound2pathway) = c("pathway", "compound")
+dummy = unlist(strsplit(compound2pathway["compound"] %>% pull, "cpd:"))
+compound2pathway["compound"] = dummy[dummy != ""]
+
+# Import HOMD
+HOMD_mapping = read.csv("./0. Raw data input/homd_result.csv") %>% as_tibble() %>% select(-X)
+```
+
+```{r import regular models}
+microb_featureNames = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "representative_sequence", "asv")
+metab_featureNames = c("SUPER_PATHWAY","SUB_PATHWAY","BIOCHEMICAL")
+microb_days = c(-14,0,2,5,9,14,21)
+metab_days = c(0,2,5,9,14)
+
+tongueModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Tongue", microb_featureNames, microb_days, "asv")
+lowlingModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Low_ling", microb_featureNames, microb_days, "asv")
+lowinterModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Low_inter", microb_featureNames, microb_days, "asv")
+uplingModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Up_ling", microb_featureNames, microb_days, "asv")
+upinterModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Up_inter", microb_featureNames, microb_days, "asv")
+salivaModel = importPARAFAC("./5. Microbiome modeling/20230605_run/PARAFAC models/Saliva", microb_featureNames, microb_days, "asv")
+```
+
+```{r Import functional models}
+microb_featureNames = c("KO", "description")
+metab_featureNames = c("SUPER_PATHWAY","SUB_PATHWAY","BIOCHEMICAL")
+microb_days = c(-14,0,2,5,9,14,21)
+metab_days = c(0,2,5,9,14)
+
+path = "./7. Functional microbiome modeling/20230607_run/PARAFAC models/"
+
+tongueFuncModel = importPARAFAC(paste0(path,"Tongue_func"), microb_featureNames, microb_days, "KO")
+lowlingFuncModel = importPARAFAC(paste0(path,"Low_ling_func"), microb_featureNames, microb_days, "KO")
+lowinterFuncModel = importPARAFAC(paste0(path,"Low_inter_func"), microb_featureNames, microb_days, "KO")
+uplingFuncModel = importPARAFAC(paste0(path,"Up_ling_func"), microb_featureNames, microb_days, "KO")
+upinterFuncModel = importPARAFAC(paste0(path,"Up_inter_func"), microb_featureNames, microb_days, "KO")
+salivaFuncModel = importPARAFAC(paste0(path, "Saliva_func"), microb_featureNames, microb_days, "KO")
+
+metabolomicsModel = importPARAFAC("./6. Metabolome modeling/20230605_run/PARAFAC models/Metabolomics", metab_featureNames, metab_days, "BIOCHEMICAL")
+```
+
+```{r Figure 1 - overview figure}
+# figure is made by combining several premade figures plus the following:
+
+rf_data %>%
+  filter(day==14) %>% 
+  select(subject,RFgroup,Area_delta_R30) %>%
+  ggplot(aes(x=Area_delta_R30,fill=as.factor(RFgroup))) +
+  geom_histogram(bins=25, col="black") +
+  xlab("RF% on day 14") +
+  ylab("Frequency") +
+  ylim(0,15) +
+  scale_fill_discrete(name="Response group", label=c("Low", "Mid", "High")) +
+  theme(legend.position = "top")
+
+rf_data %>% 
+  select(day,RFgroup,Area_delta_R30) %>%
+  ggplot(aes(x=as.factor(day),y=Area_delta_R30,fill=as.factor(RFgroup))) +
+  geom_boxplot() +
+  xlab("Day") + 
+  ylab("RF%") + 
+  scale_fill_discrete(name="Response group", label=c("Low", "Mid", "High")) +
+  theme(text = element_text(size=14),
+        legend.position="top")
+```
+
+```{r Figure 2 - biplots}
+loadCongruences = function(path, nameVector){
+  df = read.csv(path, header=FALSE)
+  numComponents = ncol(df)
+  
+  colnames(df) = paste0("Congruence_", 1:numComponents)
+  row.names(df) = nameVector
+  return(df)
+}
+
+tongueFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Tongue_feature_congruence_loadings.csv", tongueModel[[2]]$asv)
+lowlingFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Low_ling_feature_congruence_loadings.csv", lowlingModel[[2]]$asv)
+lowinterFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Low_inter_feature_congruence_loadings.csv", lowinterModel[[2]]$asv)
+uplingFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Up_ling_feature_congruence_loadings.csv", uplingModel[[2]]$asv)
+upinterFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Up_inter_feature_congruence_loadings.csv", upinterModel[[2]]$asv)
+salivaFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Saliva_feature_congruence_loadings.csv", salivaModel[[2]]$asv)
+metabolomicsFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Metabolomics_feature_congruence_loadings.csv", metabolomicsModel[[2]]$BIOCHEMICAL)
+
+filterFeatures = function(model, varExpMultiplier){
+  modelVarExp = sum(model[[6]]^2, na.rm=TRUE) / sum(model[[7]]^2, na.rm=TRUE)
+  wellModeledFeatures = apply(model[[6]]^2, 2, function(x){sum(x, na.rm=TRUE)}) / apply(model[[7]]^2, 2, function(x){sum(x, na.rm=TRUE)}) > (varExpMultiplier*modelVarExp)
+  result = cbind(colnames(model[[6]]), as.logical(as.numeric(wellModeledFeatures))) %>% as_tibble()
+  colnames(result) = c("featureName", "keep")
+  return(result)
+}
+
+microbiomeFilter = 1 # this is one times the varExp of the entire model
+metabolomeFilter = 2 # this is two times the varExp of the entire model
+
+tongueFilteredFeatures_varexp = filterFeatures(tongueModel, microbiomeFilter)
+lowlingFilteredFeatures_varexp = filterFeatures(lowlingModel, microbiomeFilter)
+lowinterFilteredFeatures_varexp = filterFeatures(lowinterModel, microbiomeFilter)
+uplingFilteredFeatures_varexp = filterFeatures(uplingModel, microbiomeFilter)
+upinterFilteredFeatures_varexp = filterFeatures(upinterModel, microbiomeFilter)
+salivaFilteredFeatures_varexp = filterFeatures(salivaModel, microbiomeFilter)
+
+metabolomicsFilteredFeatures_varexp = filterFeatures(metabolomicsModel, metabolomeFilter)
+
+filterByCongruence = function(congruenceOutput, labels, labelName, threshold=0.5){
+  numComponents = ncol(congruenceOutput)
+  
+  if(numComponents == 1){
+    keep1 = abs(congruenceOutput[,1]) > threshold
+    keep2 = FALSE
+  }
+  else{
+    keep1 = abs(congruenceOutput[,1]) > threshold
+    keep2 = abs(congruenceOutput[,2]) > threshold
+  }
+  
+  result = labels %>% as_tibble() %>% mutate(keep = (keep1 | keep2))
+  colnames(result) = c(labelName, "keep")
+  return(result)
+}
+
+microbiomeFilter = 0.4 # this is having a congruence of 0.4 in either component
+metabolomeFilter = 0.4 # this is having a congruence of 0.4 in either component
+
+tongueFilteredFeatures_congruence = filterByCongruence(tongueFeatureCongruences, tongueModel[[2]]$asv, "featureName", microbiomeFilter)
+lowlingFilteredFeatures_congruence = filterByCongruence(lowlingFeatureCongruences, lowlingModel[[2]]$asv, "featureName", microbiomeFilter)
+lowinterFilteredFeatures_congruence = filterByCongruence(lowinterFeatureCongruences, lowinterModel[[2]]$asv, "featureName", microbiomeFilter)
+uplingFilteredFeatures_congruence = filterByCongruence(uplingFeatureCongruences, uplingModel[[2]]$asv, "featureName", microbiomeFilter)
+upinterFilteredFeatures_congruence = filterByCongruence(upinterFeatureCongruences, upinterModel[[2]]$asv, "featureName", microbiomeFilter)
+salivaFilteredFeatures_congruence = filterByCongruence(salivaFeatureCongruences, salivaModel[[2]]$asv, "featureName", microbiomeFilter)
+metabolomicsFilteredFeatures_congruence = filterByCongruence(metabolomicsFeatureCongruences, metabolomicsModel[[2]]$BIOCHEMICAL, "featureName", metabolomeFilter)
+
+tongueFilteredFeatures = tongueFilteredFeatures_varexp %>% mutate(keep = (tongueFilteredFeatures_varexp$keep==TRUE & tongueFilteredFeatures_congruence$keep==TRUE))
+lowlingFilteredFeatures = lowlingFilteredFeatures_varexp %>% mutate(keep = (lowlingFilteredFeatures_varexp$keep==TRUE & lowlingFilteredFeatures_congruence$keep==TRUE))
+lowinterFilteredFeatures = lowinterFilteredFeatures_varexp %>% mutate(keep = (lowinterFilteredFeatures_varexp$keep==TRUE & lowinterFilteredFeatures_congruence$keep==TRUE))
+uplingFilteredFeatures = uplingFilteredFeatures_varexp %>% mutate(keep = (uplingFilteredFeatures_varexp$keep==TRUE & uplingFilteredFeatures_congruence$keep==TRUE))
+upinterFilteredFeatures = upinterFilteredFeatures_varexp %>% mutate(keep = (upinterFilteredFeatures_varexp$keep==TRUE & upinterFilteredFeatures_congruence$keep==TRUE))
+salivaFilteredFeatures = salivaFilteredFeatures_varexp %>% mutate(keep = (salivaFilteredFeatures_varexp$keep==TRUE & salivaFilteredFeatures_congruence$keep==TRUE))
+
+metabolomicsFilteredFeatures = metabolomicsFilteredFeatures_varexp %>% mutate(keep = (metabolomicsFilteredFeatures_varexp$keep==TRUE & metabolomicsFilteredFeatures_congruence$keep==TRUE))
+
+biplotAcrossTime = function(model, filteredFeatures, titleString){
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  
+  F = kroneckercol(A,C)
+  Btilde = gramSchmidt(B)$Q
+  T = pinv(B) %*% Btilde
+  Ftilde = F %*% T
+  
+  numComponents = ncol(model[[3]]) - 1
+  ssqResiduals_subjects = (model[[5]] - model[[4]])^2 %>% as_tibble() %>% rowSums(., na.rm=TRUE) %>% as_tibble() %>% mutate(subject=model[[1]]$subject) %>% mutate(ssqResidualsSubjects = value) %>% select(-value)
+  modelVarExp = round(sum(model[[4]]^2, na.rm=TRUE) / sum(model[[5]]^2, na.rm=TRUE) * 100, digits=1)
+  
+  Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject,each=nrow(model[[3]])), timepoint = rep(model[[3]]$days, nrow(model[[1]]))) %>% left_join(ssqResiduals_subjects)
+
+  if(numComponents == 2){
+    colnames(Ftilde) = c("Component_1", "Component_2", "subject", "timepoint", "ssqResiduals")
+    
+    enlargingFactor = mean(apply(Ftilde[,1:2], 2, max) / apply(Btilde, 2, max))
+    Btilde = Btilde * enlargingFactor
+    Btilde = Btilde %>% as_tibble() %>% mutate(featureName = model[[2]]$asv) %>% left_join(filteredFeatures) %>% filter(keep==TRUE) %>% select(V1,V2)
+    colnames(Btilde) = c("Component_1", "Component_2")
+  }
+  else{
+    colnames(Ftilde) = c("Component_1", "subject", "timepoint", "ssqResiduals")
+    enlargingFactor = apply(Ftilde[,1], 2, max) / apply(Btilde, 2, max)
+    Btilde = Btilde * enlargingFactor
+    Btilde = Btilde %>% as_tibble() %>% mutate(featureName = model[[2]]$asv) %>% left_join(filteredFeatures) %>% filter(keep==TRUE) %>% select(V1)
+    colnames(Btilde) = c("Component_1")
+    Btilde = Btilde %>% mutate(Component_2 = 0)
+    
+    set.seed(1)
+    jitterpoints = rep(jitter(rep(0, nrow(model[[1]]))), each=nrow(model[[3]]))
+    Ftilde = Ftilde %>% mutate(Component_2=jitterpoints)
+  }
+  
+  Btilde = Btilde %>% mutate(asv = filteredFeatures %>% filter(keep==TRUE) %>% select(featureName) %>% pull()) %>% left_join(HOMD_mapping)
+  
+  if(numComponents == 2){
+      ggplot() + 
+    geom_segment(data = Btilde, aes(x=0,y=0,xend=Component_1,yend=Component_2), arrow=arrow(angle=15, length=unit(0.10, "inches")), color="red", alpha=0.75) +
+    geom_point(data = Ftilde %>% filter(timepoint==-14), aes(x=Component_1, y=Component_2, group=as.factor(subject), col=ssqResiduals)) +
+    geom_path(data = Ftilde, aes(x=Component_1, y=Component_2, group=as.factor(subject), col=ssqResiduals), arrow = arrow(angle = 15, length=unit(0.10, "inches"), type = "closed")) +
+    #geom_label_repel(data = Btilde, aes(x=Component_1, y=Component_2, label=homd), max.overlaps=5, segment.color=NA) +
+    scale_x_continuous(name="Component 1 (scores)",
+                       sec.axis=sec_axis(name="Component 1 (loadings)",~./enlargingFactor)) +
+    scale_y_continuous(name="Component 2 (scores)",
+                       sec.axis=sec_axis(name="Component 2 (loadings)",~./enlargingFactor)) +
+    scale_colour_gradient("Sum of squared residuals (subjects)", limits=c(0,1200), low="black", high="white") +
+    theme(axis.text.x = element_blank(),
+          axis.text.x.top = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.x.top = element_blank(),
+          axis.text.y = element_blank(),
+          axis.text.y.right = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.ticks.y.right = element_blank()) +
+    ggtitle(paste0(titleString, " (", modelVarExp, "%)"))
+  }
+  else{
+    ggplot() + 
+    #geom_segment(data = Btilde, aes(x=0,y=0,xend=Component_1,yend=Component_2), arrow=arrow(angle=15, length=unit(0.10, "inches")), color="red", alpha=0.75) +
+    geom_point(data = Ftilde %>% filter(timepoint==-14), aes(x=-14, y=Component_1, group=as.factor(subject), col=ssqResiduals)) +
+    geom_path(data = Ftilde, aes(x=timepoint, y=Component_1, group=as.factor(subject), col=ssqResiduals), arrow = arrow(angle = 15, length=unit(0.10, "inches"), type = "closed")) +
+    #geom_label_repel(data = Btilde, aes(x=Component_1, y=Component_2, label=homd), max.overlaps=5, segment.color=NA) +
+    scale_x_continuous(name="Time",
+                       sec.axis=sec_axis(name="",~./enlargingFactor)) +
+    scale_y_continuous(name="Component 1 (scores)",
+                       sec.axis=sec_axis(name="",~./enlargingFactor)) +
+    scale_colour_gradient("Sum of squared residuals (subjects)", limits=c(0,1200), low="black", high="white") +
+    theme(axis.text.x.top = element_blank(),
+          #axis.text.x = element_blank(),
+          #axis.ticks.x = element_blank(),
+          axis.ticks.x.top = element_blank(),
+          axis.text.y = element_blank(),
+          axis.text.y.right = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.ticks.y.right = element_blank()) +
+    ggtitle(paste0(titleString, " (", modelVarExp, "%)"))
+  }
+  
+
+}
+
+a = biplotAcrossTime(tongueModel, tongueFilteredFeatures, "Tongue")
+b = biplotAcrossTime(lowlingModel, lowlingFilteredFeatures, "Lower jaw, lingual")
+c = biplotAcrossTime(lowinterModel, lowinterFilteredFeatures, "Lower jaw, interproximal")
+d = biplotAcrossTime(uplingModel, uplingFilteredFeatures, "Upper jaw, lingual")
+e = biplotAcrossTime(upinterModel, upinterFilteredFeatures, "Upper jaw, interproximal")
+f = biplotAcrossTime(salivaModel, salivaFilteredFeatures, "Saliva")
+
+print(a)
+print(b)
+print(c)
+print(d)
+print(e)
+print(f)
+
+fig = ggarrange(a + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                d + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                e + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                f + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                b + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                c + theme(axis.title.y.right=element_blank(),axis.title.x.top=element_blank(),axis.title.y.left=element_blank(),axis.title.x.bottom=element_blank()),
+                nrow=3, ncol=2, common.legend=TRUE)
+
+library(ggrepel)
+subjectLabels = c(LETTERS, letters[1:15])
+labelSize=2.5
+f1d = tongueModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(RFgroup),label=subjectLabels)) + geom_text_repel(size=labelSize,box.padding=0.1,max.overlaps=100) + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f1c = lowlingModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=Component_1,y=0,col=as.factor(RFgroup),label=subjectLabels)) + geom_text_repel(size=labelSize,box.padding=0.1,max.overlaps=100) + xlab("Component 1") + ylab("") + theme(legend.position="none", text = element_text(size=14))
+#f1b = lowlingModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=reorder(name,Component_1),y=Component_1,fill=as.factor(RFgroup))) + geom_bar(stat="identity",col="black") + theme(legend.position="none") + xlab("Subject") + ylab("Component 1")
+f1a = uplingModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(RFgroup),label=subjectLabels)) + geom_text_repel(size=labelSize,box.padding=0.1,max.overlaps=100) + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f1b = upinterModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(RFgroup),label=subjectLabels)) + geom_text_repel(size=labelSize,box.padding=0.1,max.overlaps=100) + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f1e = salivaModel[[1]] %>% mutate(name=subjectLabels) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(RFgroup),label=subjectLabels)) + geom_text_repel(size=labelSize,box.padding=0.1,max.overlaps=100) + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+
+# Not yet fixed, but this uses clustering from next section
+f2d = tongueModel[[2]] %>% left_join(tongueFeatureClustering %>% select(asv,group)) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(group))) + geom_point() + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f2c = lowlingModel[[2]] %>% left_join(lowlingFeatureClustering %>% select(asv,group)) %>% ggplot(aes(x=Component_1,y=0,col=as.factor(group))) + geom_point() + xlab("Component 1") + ylab("") + theme(legend.position="none", text = element_text(size=14))
+f2a = uplingModel[[2]] %>% left_join(uplingFeatureClustering %>% select(asv,group)) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(group))) + geom_point() + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f2b = upinterModel[[2]] %>% left_join(upinterFeatureClustering %>% select(asv,group)) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(group))) + geom_point() + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+f2e = salivaModel[[2]] %>% left_join(salivaFeatureClustering %>% select(asv,group)) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(group))) + geom_point() + xlab("Component 1") + ylab("Component 2") + theme(legend.position="none", text = element_text(size=14))
+
+#Time
+f3d = tongueModel[[3]] %>% pivot_longer(-days) %>% ggplot(aes(x=days,y=value,col=as.factor(name))) + geom_path() + geom_point(col="black") + xlab("Days") + ylab("Value") + theme(legend.position="none", text = element_text(size=14))
+f3c = lowlingModel[[3]] %>% pivot_longer(-days) %>% ggplot(aes(x=days,y=value,col=as.factor(name))) + geom_path() + geom_point(col="black") + xlab("Days") + ylab("Value") + theme(legend.position="none", text = element_text(size=14))
+f3a = uplingModel[[3]] %>% pivot_longer(-days) %>% ggplot(aes(x=days,y=value,col=as.factor(name))) + geom_path() + geom_point(col="black") + xlab("Days") + ylab("Value") + theme(legend.position="none", text = element_text(size=14))
+f3b = upinterModel[[3]] %>% pivot_longer(-days) %>% ggplot(aes(x=days,y=value,col=as.factor(name))) + geom_path() + geom_point(col="black") + xlab("Days") + ylab("Value") + theme(legend.position="none", text = element_text(size=14))
+f3e = salivaModel[[3]] %>% pivot_longer(-days) %>% ggplot(aes(x=days,y=value,col=as.factor(name))) + geom_path() + geom_point(col="black") + xlab("Days") + ylab("Value") + theme(legend.position="none", text = element_text(size=14))
+
+ggarrange(f1a,f2a,f3a,f1b,f2b,f3b,f1c,f2c,f3c,f1d,f2d,f3d,f1e,f2e,f3e, ncol=3, nrow=5)
+```
+
+```{r Figure 3 - relative abundances per ASV cluster}
+# Figure works if you run figure 2 first
+# Table with significant difference between high/low response groups is generated at the bottom.
+# Note: this takes a while to run so for now I have set the number of permutations to 9 instead of 999.
+library(cluster)
+
+clusterFeatureLoadings_filtered = function(model, filteredFeatures, numClusters){
+  numComponents = ncol(model[[3]]) - 1
+  Btilde = correctPARAFACloadings(model, 2)
+  colnames(Btilde) = paste0("Component_", 1:numComponents)
+  df = Btilde %>% as_tibble() %>% mutate(asv=model[[2]]$asv) %>% left_join(filteredFeatures, by = c("asv" = "featureName")) %>% filter(keep == 1)
+  result = df
+  
+  selectedFeatures = filteredFeatures %>% filter(keep==TRUE) %>% select(featureName) %>% pull()
+  Xhat = model[[6]] %>% select(all_of(selectedFeatures))
+  
+  set.seed(1)
+  result$group = pam(t(Xhat), numClusters, nstart=50)$cluster
+  result = result %>% left_join(HOMD_mapping)
+  
+  return(result)
+}
+
+tongueFeatureClustering = clusterFeatureLoadings_filtered(tongueModel, tongueFilteredFeatures, 2)
+lowlingFeatureClustering = clusterFeatureLoadings_filtered(lowlingModel, lowlingFilteredFeatures, 2)
+lowinterFeatureClustering = clusterFeatureLoadings_filtered(lowinterModel, lowinterFilteredFeatures, 2)
+uplingFeatureClustering = clusterFeatureLoadings_filtered(uplingModel, uplingFilteredFeatures, 2)
+upinterFeatureClustering = clusterFeatureLoadings_filtered(upinterModel, upinterFilteredFeatures, 4)
+salivaFeatureClustering = clusterFeatureLoadings_filtered(salivaModel, salivaFilteredFeatures, 2)
+
+model = metabolomicsModel
+filteredFeatures = metabolomicsFilteredFeatures
+numClusters = 2
+
+numComponents = ncol(model[[3]]) - 1
+Btilde = correctPARAFACloadings(model, 2)
+colnames(Btilde) = paste0("Component_", 1:numComponents)
+df = Btilde %>% as_tibble() %>% mutate(BIOCHEMICAL=model[[2]]$BIOCHEMICAL) %>% left_join(filteredFeatures, by = c("BIOCHEMICAL" = "featureName")) %>% filter(keep == 1)
+result = df
+df = df %>% select(Component_1, Component_2) %>% as.matrix()
+set.seed(1)
+result$group = pam(df, numClusters, nstart=50)$cluster
+
+metabolomicsFeatureClustering = result
+
+microbiome.numeric = microbiome.raw %>% as_tibble() %>% filter(group=="control", niche != "lower jaw, interproximal")
+microbiome.meta = microbiome.numeric %>% select(subject,visit, niche)
+microbiome.numeric = microbiome.numeric %>% select(-sample,-subject,-visit,-group,-niche)
+totalSums = rowSums(microbiome.numeric)
+relativeAbundances = sweep(microbiome.numeric, 1, totalSums, FUN="/") %>% as_tibble() %>% mutate(subject = microbiome.meta$subject, visit=microbiome.meta$visit, niche=microbiome.meta$niche)
+
+days = c(-14,0,2,5,9,14,21)
+RFgroupNames = c("Low responders", "Mid responders", "High responders")
+featureClustering = rbind(tongueFeatureClustering %>% mutate(niche="tongue") %>% select(niche,asv, group),
+                          lowlingFeatureClustering %>% mutate(niche="lower jaw, lingual") %>% select(niche,asv, group),
+                          uplingFeatureClustering %>% mutate(niche="upper jaw, lingual") %>% select(niche,asv, group),
+                          upinterFeatureClustering %>% mutate(niche="upper jaw, interproximal") %>% filter(group %in% c(1,2)) %>% select(niche,asv, group),
+                          salivaFeatureClustering %>% mutate(niche="saliva") %>% select(niche,asv, group))
+
+featureClustering_unfiltered = rbind(tongueFeatureClustering %>% mutate(niche="tongue") %>% select(niche,asv, group),
+                          lowlingFeatureClustering %>% mutate(niche="lower jaw, lingual") %>% select(niche,asv, group),
+                          uplingFeatureClustering %>% mutate(niche="upper jaw, lingual") %>% select(niche,asv, group),
+                          upinterFeatureClustering %>% mutate(niche="upper jaw, interproximal") %>% select(niche,asv, group),
+                          salivaFeatureClustering %>% mutate(niche="saliva") %>% select(niche,asv, group))
+
+df = relativeAbundances %>%
+  select(all_of(c(featureClustering$asv, "subject", "visit", "niche"))) %>%
+  pivot_longer(-c(subject,visit,niche)) %>%
+  left_join(featureClustering, by=c("name"="asv","niche")) %>% 
+  filter(group != "NA") %>%
+  group_by(niche, subject, visit, group) %>% 
+  summarize(s = log10(sum(value)+1)) %>% 
+  ungroup() %>%
+  left_join(rf) %>% 
+  mutate(RFgroup = as.factor(RFgroup)) %>%
+  select(-subject) %>%
+  group_by(niche, RFgroup, visit, group) %>%
+  summarize(m = mean(s, na.rm=TRUE), v = plotrix::std.error(s,na.rm=TRUE)) %>%
+  ungroup() %>%
+  mutate(RFgroup = as.numeric(RFgroup)) %>%
+  mutate(visit = days[visit], RFgroup = RFgroupNames[RFgroup])
+
+df_unfiltered = relativeAbundances %>%
+  select(all_of(c(featureClustering_unfiltered$asv, "subject", "visit", "niche"))) %>%
+  pivot_longer(-c(subject,visit,niche)) %>%
+  left_join(featureClustering_unfiltered, by=c("name"="asv","niche")) %>% 
+  filter(group != "NA") %>%
+  group_by(niche, subject, visit, group) %>% 
+  summarize(s = log10(sum(value)+1)) %>% 
+  ungroup() %>%
+  left_join(rf) %>% 
+  mutate(RFgroup = as.factor(RFgroup)) %>%
+  select(-subject) %>%
+  group_by(niche, RFgroup, visit, group) %>%
+  summarize(m = mean(s, na.rm=TRUE), v = plotrix::std.error(s,na.rm=TRUE)) %>%
+  ungroup() %>%
+  mutate(RFgroup = as.numeric(RFgroup)) %>%
+  mutate(visit = days[visit], RFgroup = RFgroupNames[RFgroup])
+
+a = df %>%
+  filter(RFgroup != "Mid responders", niche == "lower jaw, lingual", group == 2) %>%
+  ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+  facet_grid(vars(niche),vars(group)) +
+  geom_line() +
+  geom_point() + 
+  geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+  xlab("Day") +
+  ylab("Relative abundance sum (mean +/- SEM)") +
+  scale_color_discrete(name="Response group") +
+  scale_y_log10()
+
+b = df_unfiltered %>%
+  filter(RFgroup != "Mid responders", niche == "upper jaw, interproximal", group %in% c(3,4)) %>%
+  ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+  facet_grid(vars(niche),vars(group)) +
+  geom_line() +
+  geom_point() + 
+  geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+  xlab("Day") +
+  ylab("Relative abundance sum (mean +/- SEM)") +
+  scale_color_discrete(name="Response group")
+
+ggarrange(a,b, nrow=2, ncol=1, common.legend=TRUE)
+
+df %>%
+  filter(RFgroup != "Mid responders") %>%
+  mutate(newGroup = paste0("ASV cluster ", group)) %>%
+  mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+  ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+  facet_grid(vars(niche),vars(newGroup)) +
+  geom_line() +
+  geom_point() + 
+  geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+  xlab("Day") +
+  ylab("Relative abundance sum (mean +/- SEM)") +
+  scale_color_discrete(name="Response group")
+
+df %>%
+  mutate(newGroup = paste0("ASV cluster ", group)) %>%
+  mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+  ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+  facet_grid(vars(niche),vars(newGroup)) +
+  geom_line() +
+  geom_point() + 
+  geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+  xlab("Day") +
+  ylab("Relative abundance sum (mean +/- SEM)") +
+  scale_color_discrete(name="Response group")
+
+a = relativeAbundances %>%
+    select(all_of(c(featureClustering$asv, "subject", "visit", "niche"))) %>%
+    pivot_longer(-c(subject,visit,niche)) %>%
+    left_join(featureClustering, by=c("name"="asv","niche")) %>% 
+    filter(group != "NA") %>%
+    group_by(niche, subject, visit, group) %>%
+    filter(niche == "upper jaw, lingual", group == 1) %>% 
+    left_join(rf) %>% filter(RFgroup == 0, visit %in% c(2,6)) %>%
+    ggplot(aes(x=as.factor(visit),y=value)) +
+    geom_boxplot()
+
+b = relativeAbundances %>%
+    select(all_of(c(featureClustering$asv, "subject", "visit", "niche"))) %>%
+    pivot_longer(-c(subject,visit,niche)) %>%
+    left_join(featureClustering, by=c("name"="asv","niche")) %>% 
+    filter(group != "NA") %>%
+    group_by(niche, subject, visit, group) %>% 
+    filter(niche == "upper jaw, lingual", group == 1) %>%
+    left_join(rf) %>% filter(RFgroup == 2, visit %in% c(2,6)) %>% 
+    ggplot(aes(x=as.factor(visit),y=value)) + 
+    geom_boxplot()
+
+ggarrange(a,b)
+# 
+# ASVgroupPermutationTest = function(nicheName, featureClustering, visitNumber, groupNumber, numPermutations){
+#   microbiome.numeric = microbiome.raw %>% as_tibble() %>% filter(group=="control", niche==nicheName, visit==visitNumber)
+#   microbiome.meta = microbiome.numeric %>% select(subject)
+#   microbiome.numeric = microbiome.numeric %>% select(-sample,-subject,-visit,-group,-niche)
+#   totalSums = rowSums(microbiome.numeric)
+#   relativeAbundances = sweep(microbiome.numeric, 1, totalSums, FUN="/") %>% as_tibble() %>% mutate(subject = microbiome.meta$subject)
+# 
+#   df = relativeAbundances %>%
+#     select(all_of(c(featureClustering$asv, "subject"))) %>%
+#     pivot_longer(-subject) %>%
+#     left_join(featureClustering, by=c("name"="asv")) %>%
+#     group_by(subject, group) %>%
+#     summarize(s=sum(value), .groups="drop") %>%
+#     ungroup() %>%
+#     left_join(rf, by="subject") %>%
+#     filter(group == groupNumber)
+#   
+#   dfA = df %>% filter(RFgroup==0) %>% select(s) %>% pull()
+#   dfB = df %>% filter(RFgroup==2) %>% select(s) %>% pull()
+#   #realResult = wilcox.test(dfA, dfB)$p.value
+#   realResult = mean(dfA) - mean(dfB)
+#   
+#   # Permutations
+#   set.seed(1)
+#   permutedResults = 1:numPermutations
+#   for(i in 1:numPermutations){
+#     dfA = df %>% mutate(RFgroup = sample(RFgroup)) %>% filter(RFgroup==0) %>% select(s) %>% pull()
+#     dfB = df %>% mutate(RFgroup = sample(RFgroup)) %>% filter(RFgroup==2) %>% select(s) %>% pull()
+#     #permutedResults[i] = wilcox.test(dfA, dfB)$p.value
+#     permutedResults[i] = mean(dfA) - mean(dfB)
+#   }
+#   
+#   Zscore = abs(realResult - mean(permutedResults)) / sd(permutedResults)
+#   
+#   if (realResult < 0){
+#     pvalue = sum(permutedResults < realResult) / numPermutations
+#   }
+#   else{
+#     pvalue = sum(permutedResults > realResult) / numPermutations
+#   }
+#   
+#   return(list(realResult, permutedResults, mean(permutedResults), median(permutedResults), sd(permutedResults), Zscore, pvalue))
+# }
+# 
+# allResults = matrix(nrow=14, ncol=9)
+# iter=1
+# niches = c("tongue", "lower jaw, lingual", "lower jaw, interproximal", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+# featureClusterings = list(tongueFeatureClustering, lowlingFeatureClustering, lowinterFeatureClustering, uplingFeatureClustering, upinterFeatureClustering, salivaFeatureClustering)
+# 
+# for(i in 1:length(niches)){
+#   nicheName = niches[i]
+#   featureClustering = featureClusterings[[i]]
+#   numGroups = max(featureClustering$group)
+#   for(j in 1:numGroups){
+#     for(k in 1:7){
+#       permutationTestResult = ASVgroupPermutationTest(nicheName, featureClustering, k, j, 9)
+#       pvalue = permutationTestResult[[7]]
+#       
+#       if(k==1){
+#         allResults[iter, 1] = nicheName
+#         allResults[iter, 2] = j
+#       }
+#       allResults[iter, k+2] = pvalue
+#     }
+#     iter = iter + 1
+#   }
+# }
+# 
+# print(allResults)
+
+a1 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "upper jaw, lingual", newGroup == "ASV cluster 1") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+a2 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "upper jaw, interproximal", newGroup == "ASV cluster 1") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+a3 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "lower jaw, lingual", newGroup == "ASV cluster 1") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+a4 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "tongue", newGroup == "ASV cluster 1") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+a5 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "saliva", newGroup == "ASV cluster 1") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+b1 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "upper jaw, lingual", newGroup == "ASV cluster 2") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+b2 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "upper jaw, interproximal", newGroup == "ASV cluster 2") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+b3 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "lower jaw, lingual", newGroup == "ASV cluster 2") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+b4 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "tongue", newGroup == "ASV cluster 2") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    theme(legend.position="none")
+
+b5 = df %>%
+    filter(RFgroup != "Mid responders") %>%
+    mutate(newGroup = paste0("ASV cluster ", group)) %>%
+    mutate(niche = factor(niche, levels=c("upper jaw, lingual", "upper jaw, interproximal", "lower jaw, lingual", "tongue", "saliva"))) %>%
+    filter(niche == "saliva", newGroup == "ASV cluster 2") %>%
+    ggplot(aes(x=visit,y=m,col=as.factor(RFgroup))) +
+    geom_line() +
+    geom_point() + 
+    geom_errorbar(aes(ymax=m+v,ymin=m-v), width=.2) +
+    xlab("") +
+    ylab("") +
+    scale_colour_discrete(name="Response group", label=c("High", "Low")) +
+    theme(legend.position="top")
+
+ggarrange(a1,b1,a2,b2,a3,b3,a4,b4,a5,b5, ncol=2, nrow=5, common.legend=TRUE)
+```
+
+```{r Figure 4 - pathway enrichment result}
+#nicheNames = c("tongue", "lower jaw, lingual", "lower jaw, interproximal", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+
+tongueSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Tongue_SetRank_result_pathways.txt", sep="\t")
+lowlingSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Lowling_SetRank_result_pathways.txt", sep="\t")
+lowinterSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Lowinter_SetRank_result_pathways.txt", sep="\t")
+uplingSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Upling_SetRank_result_pathways.txt", sep="\t")
+upinterSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Upinter_SetRank_result_pathways.txt", sep="\t")
+salivaSetRankResult = read.csv("./9. Functional enrichment analysis/20230607_run/Saliva_SetRank_result_pathways.txt", sep="\t")
+
+# allResults2 = list(tongueSetRankResult, lowlingSetRankResult, lowinterSetRankResult, uplingSetRankResult, upinterSetRankResult, salivaSetRankResult)
+# minPvalue = 0.005
+# pathwayResults2 = ""
+# 
+# for(i in 1:length(allResults2)){
+#   result = allResults2[[i]]
+#   pathwayResults2 = c(pathwayResults2, result %>% filter(correctedPValue < minPvalue) %>% select(description) %>% pull)
+# }
+# 
+# minNiches = 1
+# selectedPathways = pathwayResults2 %>% table() %>% as_tibble() %>% filter(n >= minNiches)
+# selectedPathways = selectedPathways[,1] %>% pull()
+# 
+# plottableData2 = tongueSetRankResult %>% filter(description %in% selectedPathways) %>% select(description, correctedPValue) %>% mutate(niche = "tongue", logValue = -log10(correctedPValue))
+# 
+# for(i in 2:length(allResults2)){
+#   result = allResults2[[i]]
+#   name = nicheNames[i]
+#   addition = result %>% filter(description %in% selectedPathways) %>% select(description, correctedPValue) %>% mutate(niche = name, logValue = -log10(correctedPValue))
+#   plottableData2 = rbind(plottableData2, addition) %>% as_tibble()
+# }
+# 
+# plottableData2 %>% 
+#   filter(niche != "lower jaw, interproximal") %>%
+#   ggplot(aes(x=as.factor(description), y=logValue, fill=as.factor(niche))) +
+#   geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+#   geom_hline(yintercept=(-log10(0.05)), col="red") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   xlab("KEGG Pathway") +
+#   ylab("-log10(p-value)") +
+#   scale_fill_discrete(name = "Sample type") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+# 
+# print(plottableData2)
+
+tongueSetRankInput = read.csv("./9. Functional enrichment analysis/20231102_setRankInput/tongueSetRankInput.csv")
+lowlingSetRankInput = read.csv("./9. Functional enrichment analysis/20231102_setRankInput/lowlingSetRankInput.csv")
+uplingSetRankInput = read.csv("./9. Functional enrichment analysis/20231102_setRankInput/uplingSetRankInput.csv")
+upinterSetRankInput = read.csv("./9. Functional enrichment analysis/20231102_setRankInput/upinterSetRankInput.csv")
+salivaSetRankInput = read.csv("./9. Functional enrichment analysis/20231102_setRankInput/salivaSetRankInput.csv")
+
+temp1 = compound2pathway
+colnames(temp1) = c("pathway", "element")
+temp2 = KO2pathway
+colnames(temp2) = c("pathway", "element")
+pathway2elements = rbind(temp1,temp2)
+
+numCompoundsPerPathway = compound2pathway %>% select(pathway) %>% table() %>% as_tibble()
+numKOsPerPathway = KO2pathway %>% select(pathway) %>% table() %>% as_tibble()
+
+KOmapper = function(pathways, setRankInput){
+  result = 1:length(pathways)
+  for(i in 1:length(pathways)){
+    name = paste0("path:",pathways[i])
+    KOs = KO2pathway %>% filter(pathway==name) %>% select(KO) %>% pull()
+    result[i] = setRankInput %>% as_tibble() %>% filter(geneID %in% KOs) %>% nrow(.)
+  }
+  return(result)
+}
+
+compoundMapper = function(pathways, setRankInput){
+  result = 1:length(pathways)
+  for(i in 1:length(pathways)){
+    name = paste0("path:",pathways[i])
+    KOs = compound2pathway %>% filter(pathway==name) %>% select(compound) %>% pull()
+    result[i] = setRankInput %>% as_tibble() %>% filter(geneID %in% KOs) %>% nrow(.)
+  }
+  return(result)
+}
+
+tongueSetRankAnnotated = tongueSetRankResult %>% as_tibble() %>% mutate(numKOs = KOmapper(name, tongueSetRankInput), numCompounds = compoundMapper(name, tongueSetRankInput)) %>% mutate(niche="Tongue")
+lowlingSetRankAnnotated = lowlingSetRankResult %>% as_tibble() %>% mutate(numKOs = KOmapper(name, lowlingSetRankInput), numCompounds = compoundMapper(name, lowlingSetRankInput)) %>% mutate(niche="Lower jaw, lingual")
+uplingSetRankAnnotated = uplingSetRankResult %>% as_tibble() %>% mutate(numKOs = KOmapper(name, uplingSetRankInput), numCompounds = compoundMapper(name, uplingSetRankInput)) %>% mutate(niche="Upper jaw, lingual")
+upinterSetRankAnnotated = upinterSetRankResult %>% as_tibble() %>% mutate(numKOs = KOmapper(name, upinterSetRankInput), numCompounds = compoundMapper(name, upinterSetRankInput)) %>% mutate(niche="Upper jaw, interproximal")
+salivaSetRankAnnotated = salivaSetRankResult %>% as_tibble() %>% mutate(numKOs = KOmapper(name, salivaSetRankInput), numCompounds = compoundMapper(name, salivaSetRankInput)) %>% mutate(niche="Saliva")
+
+pValueThreshold = 0.05
+minKO = 2
+minCompound = 2
+result1 = tongueSetRankAnnotated %>% arrange(correctedPValue) %>% filter(correctedPValue <= pValueThreshold, numKOs >= minKO, numCompounds >= minCompound) %>% select(name, description, correctedPValue)
+result2 = lowlingSetRankAnnotated %>% arrange(correctedPValue) %>% filter(correctedPValue <= pValueThreshold, numKOs >= minKO, numCompounds >= minCompound)%>% select(name, description, correctedPValue)
+result3 = uplingSetRankAnnotated %>% arrange(correctedPValue) %>% filter(correctedPValue <= pValueThreshold, numKOs >= minKO, numCompounds >= minCompound)%>% select(name, description, correctedPValue)
+result4 = upinterSetRankAnnotated %>% arrange(correctedPValue) %>% filter(correctedPValue <= pValueThreshold, numKOs >= minKO, numCompounds >= minCompound)%>% select(name, description, correctedPValue)
+result5 = salivaSetRankAnnotated %>% arrange(correctedPValue) %>% filter(correctedPValue <= pValueThreshold, numKOs >= minKO, numCompounds >= minCompound)%>% select(name, description, correctedPValue)
+
+selectedPathways = rbind(result1,result2,result3,result4,result5) %>% as_tibble() %>% select(name) %>% pull() %>% unique()
+
+plottableData = rbind(tongueSetRankAnnotated, lowlingSetRankAnnotated, uplingSetRankAnnotated, upinterSetRankAnnotated, salivaSetRankAnnotated) %>% filter(name %in% selectedPathways) %>% mutate(logValue = -1*log10(correctedPValue))
+
+plottableData %>% 
+  ggplot(aes(x=as.factor(description), y=logValue, fill=as.factor(niche))) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+  geom_hline(yintercept=(-log10(0.05)), col="red") +
+  xlab("KEGG Pathway") +
+  ylab("-log10(p-value)") +
+  scale_fill_discrete(name = "Sample type") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plottableData %>% 
+  ggplot(aes(x=as.factor(niche), y=logValue, fill=as.factor(description))) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+  geom_hline(yintercept=(-log10(0.05)), col="red") +
+  xlab("Sample type") +
+  ylab("-log10(p-value)") +
+  scale_fill_discrete(name = "Pathway name") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plottableData %>% 
+    mutate(niche = factor(niche, levels=c("Saliva", "Tongue", "Lower jaw, lingual", "Upper jaw, interproximal", "Upper jaw, lingual"))) %>%
+    ggplot(aes(y=niche, x=logValue, fill=as.factor(description))) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    geom_vline(xintercept=(-log10(0.05)), col="red") +
+    xlab("-log10(p-value)") +
+    ylab("Sample type") +
+    scale_fill_discrete(name = "Pathway name") +
+    theme(legend.position="bottom", text = element_text(size=14)) +
+    guides(fill = guide_legend(ncol=2))
+```
+
+```{r Table 1 - correlations between subject loadings and metadata}
+library(vegan)
+
+models = list(tongueModel, lowlingModel, uplingModel, upinterModel, salivaModel)
+allModels = list(tongueModel, lowlingModel, uplingModel, upinterModel, salivaModel, metabolomicsModel)
+nicheNames = c("tongue", "lower jaw, lingual", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+
+testGender = function(models){
+  result = 1:9
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df = model[[1]] %>% left_join(age_gender, by="subject")
+    dfA = df %>% filter(gender==1)
+    dfB = df %>% filter(gender==2)
+    
+    for(i in 1:numComponents){
+      testResult = t.test(dfA[,i], dfB[,i])
+      result[iterator] = testResult$p.value
+      iterator = iterator + 1
+    }
+  }
+  return(result)
+}
+
+testAge = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df = model[[1]] %>% left_join(age_gender, by = "subject")
+    dfA = df %>% select(age) %>% pull
+    
+    for(i in 1:numComponents){
+      dfB = df[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("Age") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testPlaque = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df = model[[1]] %>% left_join(rf_data %>% filter(day==14), by="subject")
+    dfA = df %>% select(plaquepercent) %>% pull
+    
+    for(i in 1:numComponents){
+      dfB = df[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("plaquepercent") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testBleeding = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df = model[[1]] %>% left_join(rf_data %>% filter(day==14), by="subject")
+    dfA = df %>% select(bomppercent) %>% pull
+    
+    for(i in 1:numComponents){
+      dfB = df[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("bomppercent") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testRF = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df = model[[1]] %>% left_join(rf_data %>% filter(day==9), by="subject")
+    dfA = df %>% select(Area_delta_R30) %>% pull
+    
+    for(i in 1:numComponents){
+      dfB = df[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("Area_delta_R30") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testRichness = function(models, nicheNames){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    nicheName = nicheNames[i]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+    df.raw.metadata = df.raw %>% select(subject,visit)
+    df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+    df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric>0))
+    colnames(df.interpretation) = c("subject", "visit", "richness")
+    
+    A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+    B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+    C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+    F = kroneckercol(A,C)
+    Btilde = gramSchmidt(B)$Q
+    T = pinv(B) %*% Btilde
+    Ftilde = F %*% T
+    
+    Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]])))
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    dfA = plottableData[,ncol(plottableData)] %>% pull()
+    
+    for(i in 1:numComponents){
+      dfB = plottableData[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("Richness") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testEvenness = function(models, nicheNames){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    nicheName = nicheNames[i]
+    numComponents = ncol(model[[3]]) - 1
+    
+    df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+    df.raw.metadata = df.raw %>% select(subject,visit)
+    df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+    df.interpretation = cbind(df.raw.metadata, diversity(df.raw.numeric, index="shannon")/log(rowSums(df.raw.numeric>0)))
+    colnames(df.interpretation) = c("subject", "visit", "evenness")
+    
+    A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+    B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+    C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+    F = kroneckercol(A,C)
+    Btilde = gramSchmidt(B)$Q
+    T = pinv(B) %*% Btilde
+    Ftilde = F %*% T
+    
+    Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]])))
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    dfA = plottableData[,ncol(plottableData)] %>% pull()
+    
+    for(i in 1:numComponents){
+      dfB = plottableData[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("Richness") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testPlaque2 = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+
+    df.interpretation = rf_data %>% select(subject, day, plaquepercent)
+    colnames(df.interpretation) = c("subject", "visit", "plaquepercent")
+    
+    A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+    B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+    C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+    F = kroneckercol(A,C)
+    Btilde = gramSchmidt(B)$Q
+    T = pinv(B) %*% Btilde
+    Ftilde = F %*% T
+    
+    Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=nrow(model[[3]])), visit = rep(model[[3]]$days, nrow(model[[1]])))
+    plottableData = Ftilde %>% left_join(df.interpretation) %>% drop_na()
+    dfA = plottableData[,ncol(plottableData)] %>% pull()
+    
+    for(i in 1:numComponents){
+      dfB = plottableData[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("plaquepercent") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testBleeding2 = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+
+    df.interpretation = rf_data %>% select(subject, day, bomppercent)
+    colnames(df.interpretation) = c("subject", "visit", "bomppercent")
+    
+    A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+    B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+    C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+    F = kroneckercol(A,C)
+    Btilde = gramSchmidt(B)$Q
+    T = pinv(B) %*% Btilde
+    Ftilde = F %*% T
+    
+    Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=nrow(model[[3]])), visit = rep(model[[3]]$days, nrow(model[[1]])))
+    plottableData = Ftilde %>% left_join(df.interpretation) %>% drop_na()
+    dfA = plottableData[,ncol(plottableData)] %>% pull()
+    
+    for(i in 1:numComponents){
+      dfB = plottableData[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("bomppercent") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+testRF2 = function(models){
+  result = 1:9
+  plotList = list()
+  iterator = 1
+  
+  for(i in 1:length(models)){
+    model = models[[i]]
+    numComponents = ncol(model[[3]]) - 1
+
+    df.interpretation = rf_data %>% select(subject, day, Area_delta_R30)
+    colnames(df.interpretation) = c("subject", "visit", "Area_delta_R30")
+    
+    A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+    B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+    C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+    F = kroneckercol(A,C)
+    Btilde = gramSchmidt(B)$Q
+    T = pinv(B) %*% Btilde
+    Ftilde = F %*% T
+    
+    Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=nrow(model[[3]])), visit = rep(model[[3]]$days, nrow(model[[1]])))
+    plottableData = Ftilde %>% left_join(df.interpretation) %>% drop_na()
+    dfA = plottableData[,ncol(plottableData)] %>% pull()
+    
+    for(i in 1:numComponents){
+      dfB = plottableData[,i] %>% pull()
+      
+      testResult = cor.test(dfA, dfB, method="pearson")
+      result[iterator] = testResult$p.value
+      
+      plot = cbind(dfA, dfB) %>% 
+        as_tibble() %>% 
+        ggplot(aes(x=dfA,y=dfB)) +
+        geom_point() +
+        ggtitle(paste0("Component ", i, " r=", testResult$estimate, " p=", testResult$p.value)) + 
+        xlab("Area_delta_R30") +
+        ylab("Loadings")
+      
+      plotList[[iterator]] = plot
+      iterator = iterator + 1
+    }
+  }
+  return(list(result, plotList))
+}
+
+genderResult = testGender(allModels)
+
+ageResult = testAge(allModels)
+ggarrange(plotlist=ageResult[[2]])
+
+plaqueResult = testPlaque2(allModels)
+ggarrange(plotlist=plaqueResult[[2]])
+
+bleedingResult = testBleeding2(allModels)
+ggarrange(plotlist=bleedingResult[[2]])
+
+rfResult = testRF2(allModels)
+ggarrange(plotlist=rfResult[[2]])
+
+richnessResult = testRichness(models, nicheNames)
+ggarrange(plotlist=richnessResult[[2]])
+
+evennessResult = testEvenness(models, nicheNames)
+ggarrange(plotlist=evennessResult[[2]])
+
+tabulatedResult = cbind(plaqueResult[[1]], bleedingResult[[1]], rfResult[[1]], c(richnessResult[[1]], NA, NA), c(evennessResult[[1]], NA, NA), ageResult[[1]], genderResult) %>% as_tibble()
+colnames(tabulatedResult) = c("Plaque", "Bleeding", "RF", "Richness", "Evenness", "Age", "Gender")
+print(tabulatedResult)
+
+correctedResult = matrix(format(p.adjust(as.numeric(as.matrix(tabulatedResult)), method="BH"), digits=2), nrow=11, ncol=7) %>% as_tibble()
+colnames(correctedResult) = c("Plaque", "Bleeding", "RF", "Richness", "Evenness", "Age", "Gender")
+print(correctedResult)
+
+# Check dilution factors
+calculateQuotients = function(df){
+  representativeSample = as.integer(as.numeric(apply(df, 2, median, na.rm=TRUE)))
+  result = matrix(0, nrow=nrow(df), ncol=ncol(df))
+  
+  for(i in 1:nrow(df)){
+    result[i,] = as.numeric(df[i,] / representativeSample)
+  }
+  
+  return(result)
+}
+
+determineDilutions = function(quotients){
+  result = apply(quotients, 1, function(x){median(x, na.rm=TRUE)})
+  return(result)
+}
+
+microbiome.raw = read.csv("./0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+taxa = read.csv("./0. Raw data input/20221005_wp2/taxonomic-classification.tsv", sep="\t")
+selectedIndividuals = microbiome.raw %>% as_tibble() %>% filter(group == "control") %>% select(subject) %>% pull %>% unique
+metabolomics.raw = read.csv("./0. Raw data input/20221005_wp2/metabolomics.tsv", sep="\t")
+metabolomics.raw.notest = metabolomics.raw %>% as_tibble() %>% filter(subject %in% selectedIndividuals)
+metabolomics.features = read.csv("./0. Raw data input/20221005_wp2/metabolomics-features.tsv", sep="\t")
+metabolomics.raw.numeric = metabolomics.raw[,3:ncol(metabolomics.raw)]
+metabolomics.raw.numeric.notest = metabolomics.raw.notest[,3:ncol(metabolomics.raw.notest)]
+
+allNA = apply(metabolomics.raw.numeric.notest, 2, function(x){all(is.na(x))})
+
+metabolomics.raw.numeric.notest = metabolomics.raw.numeric.notest[,!allNA]
+
+colnames(metabolomics.raw.numeric) = metabolomics.features$BIOCHEMICAL
+colnames(metabolomics.raw.numeric.notest) = metabolomics.features[!allNA, "BIOCHEMICAL"]
+
+metabolomics.raw.metadata = metabolomics.raw.notest[,1:2]
+metabolomics.data.imp = metabolomics.raw.numeric.notest
+metabolomics.imputed = metabolomics.data.imp
+detectionLimits = apply(metabolomics.raw.numeric.notest, 2, function(x) min(x, na.rm=TRUE)) %>% as.numeric()
+
+for(i in 1:ncol(metabolomics.raw.numeric.notest)) {
+  print(i)
+  metabolomics.imputed[,i] = is.na(metabolomics.data.imp[,i])
+  metabolomics.data.imp[which(is.na(metabolomics.data.imp[,i])), i] = round(detectionLimits[i] * runif(1))
+}
+
+metabolomics.imputed = cbind(metabolomics.raw.metadata, metabolomics.imputed) %>% as_tibble()
+metabolomics.data.pqn = metabolomics.data.imp
+quotients = calculateQuotients(metabolomics.data.pqn)
+dilution = determineDilutions(quotients)
+
+model = metabolomicsModel
+numComponents = ncol(model[[3]]) - 1
+
+df.interpretation = cbind(metabolomics.raw.metadata, dilution) %>% as_tibble()
+
+A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+F = kroneckercol(A,C)
+Btilde = gramSchmidt(B)$Q
+T = pinv(B) %*% Btilde
+Ftilde = F %*% T
+
+Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=nrow(model[[3]])), visit = rep(2:6, nrow(model[[1]])))
+plottableData = Ftilde %>% left_join(df.interpretation) %>% drop_na()
+
+cor.test(plottableData[,1] %>% pull(), plottableData$dilution, method="pearson")
+cor.test(plottableData[,2] %>% pull(), plottableData$dilution, method="pearson")
+
+plottableData %>% ggplot(aes(x=dilution,y=V1)) + geom_point()
+plottableData %>% ggplot(aes(x=dilution,y=V2)) + geom_point()
+```
+
+```{r Table 2 - ASV groups}
+# Table is based on clustering data generated in Figure 2 and 3.
+reportNamesPerGroup = function(featureClustering, model){
+  numClusters = max(featureClustering$group)
+  
+  for(i in 1:numClusters){
+    print(i)
+    df = featureClustering %>% left_join(model[[2]], by="asv") %>% filter(group == i) %>% select(asv, Genus, Species, homd)
+    print(df)
+  }
+}
+
+reportNamesPerGroup(tongueFeatureClustering, tongueModel)
+reportNamesPerGroup(lowlingFeatureClustering, lowlingModel)
+reportNamesPerGroup(lowinterFeatureClustering, lowinterModel)
+reportNamesPerGroup(uplingFeatureClustering, uplingModel)
+reportNamesPerGroup(upinterFeatureClustering, upinterModel)
+reportNamesPerGroup(salivaFeatureClustering, salivaModel)
+
+featureClustering = metabolomicsFeatureClustering
+for(i in 1:numClusters){
+  print(i)
+  df = featureClustering %>% left_join(metabolomicsModel[[2]], by="BIOCHEMICAL") %>% filter(group == i) %>% select(BIOCHEMICAL, SUB_PATHWAY, SUPER_PATHWAY)
+  print(df)
+}
+```
+
+```{r Figure S1 - wide pathway result}
+# Runs if you made fig 4 before this
+
+minNiches = 1
+selectedPathways = pathwayResults2 %>% table() %>% as_tibble() %>% filter(n >= minNiches)
+selectedPathways = selectedPathways[,1] %>% pull()
+
+plottableData2 = tongueSetRankResult %>% filter(description %in% selectedPathways) %>% select(description, correctedPValue) %>% mutate(niche = "tongue", logValue = -log10(correctedPValue))
+
+for(i in 2:length(allResults2)){
+  result = allResults2[[i]]
+  name = nicheNames[i]
+  addition = result %>% filter(description %in% selectedPathways) %>% select(description, correctedPValue) %>% mutate(niche = name, logValue = -log10(correctedPValue))
+  plottableData2 = rbind(plottableData2, addition) %>% as_tibble()
+}
+
+plottableData2 %>% ggplot(aes(x=as.factor(description), y=logValue, fill=as.factor(niche))) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+  geom_hline(yintercept=(-log10(0.05)), col="red") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  xlab("KEGG Pathway") +
+  ylab("-log10(p-value)") +
+  scale_fill_discrete(name = "Sampling location") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r Figure S2 - ASV sparsity}
+microbiome.raw = read.csv("./0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+
+calcSparsity = function(nicheName, RFgroupNum){
+  df = microbiome.raw %>%
+    as_tibble() %>%
+    filter(group == "control", niche == nicheName) %>%
+    left_join(rf) %>% 
+    filter(RFgroup==RFgroupNum) %>% 
+    select(starts_with("ASV"))
+  
+  result = colSums(df==0) / nrow(df)
+  return(result)
+}
+
+niches = c("tongue", "lower jaw, lingual", "lower jaw, interproximal", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+
+resultList = list()
+iterator = 1
+
+for(i in 1:length(niches)){
+  for(j in 0:2){
+    resultList[[iterator]] = calcSparsity(niches[i], j)
+    iterator = iterator + 1
+  }
+}
+
+temp = data.frame(matrix(unlist(resultList), nrow=length(resultList), byrow=TRUE))
+colnames(temp) = colnames(microbiome.raw %>% as_tibble() %>% select(starts_with("ASV")))
+temp$RFgroup = rep(c("low", "mid", "high"), 6)
+temp$niche = rep(niches, each=3)
+df = temp %>% 
+  as_tibble() %>%
+  pivot_longer(-c(niche,RFgroup)) %>%
+  mutate(niche = as.factor(niche), RFgroup = factor(RFgroup, levels=c("low", "mid", "high")))
+
+df %>% ggplot(aes(x=value)) +
+  facet_grid(vars(niche), vars(RFgroup)) +
+  geom_histogram() +
+  scale_y_log10() +
+  geom_vline(xintercept=0.5, colour="red") +
+  xlab("Sparsity (%)") + 
+  ylab("Frequency")
+```
+
+```{r Figure S3 - metabolite NAs}
+temp = metabolomics.raw.notest %>% select(-subject,-visit)
+df = (colSums(is.na(temp)) / nrow(temp)) * 100
+
+df %>% 
+  as_tibble() %>% 
+  ggplot(aes(x=value)) + 
+  geom_histogram() + 
+  geom_vline(xintercept=25, colour="red") +
+  xlab("Percentage of values that are missing") + 
+  ylab("Frequency")
+```
+
+```{r Figure S4 - sampling depth}
+microbiome.raw = read.csv("./0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+counts_control = microbiome.raw %>% as_tibble() %>% filter(group=="control")
+rare_threshold = 10000
+
+cbind(counts_control$niche, rowSums(counts_control[,6:ncol(counts_control)])) %>%
+  as_tibble() %>%
+  mutate(V1 = as.factor(V1), V2 = as.numeric(V2)) %>%
+  ggplot(aes(x=V1,y=V2)) + 
+  geom_violin() +
+  geom_boxplot(width=0.25) + 
+  xlab("Sample type") + 
+  ylab("Sample depth") + 
+  geom_hline(yintercept=rare_threshold, col="red") +
+  ggtitle("Sequencing depth per sampling site") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r Figure S5 - sampling depth histogram}
+microbiome.raw = read.csv("./0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+counts_control = microbiome.raw %>% as_tibble() %>% filter(group=="control")
+rare_threshold = 10000
+
+rowSums(counts_control[,6:ncol(counts_control)]) %>%
+  as_tibble() %>%
+  ggplot(aes(x=value)) +
+  geom_histogram() +
+  geom_vline(xintercept=rare_threshold, col="red") +
+  xlab("Total number of reads per sample") +
+  ylab("Number of samples") +
+  ggtitle("TIFN microbiome data total number of reads per sample")
+```
+
+```{r Figure S6 - FTUs}
+path = "D:/GitHub/TIFN/Homogenized data analysis/1. Tax4Fun2/TIFN_Tax4Fun_rarefied_10k_output/functional_prediction.txt"
+input_df = readRDS("1. Tax4Fun2/TIFN_Tax4Fun2_rarefied_annotated_10k.RDS") %>% as_tibble()
+input_df = input_df %>% select(sample,subject,visit,group,niche)
+input_df_indexed = input_df %>% mutate(consistent_index=1:nrow(.))
+output_df = read.csv(path, sep="\t", header=TRUE) %>% as_tibble()
+
+ko2name = output_df[,c(1,ncol(output_df))]
+colnames(ko2name) = c("KO", "description")
+ko2name = ko2name %>% as_tibble()
+
+output_df = output_df %>% select(-KO, -description)
+
+df = read.table("D:/GitHub/TIFN/Homogenized data analysis/1. Tax4Fun2/TIFN_Tax4Fun_rarefied_10k_output/logfile2.txt", sep=" ", skip=3)
+FTUs = df[1:1639,2]
+FSUs = df[1646:3284,2]
+
+df = cbind(input_df$niche, FTUs) %>% as_tibble()
+df$FTUs = as.numeric(df$FTUs)
+colnames(df) = c("niche", "FTU")
+
+df %>%
+  ggplot(aes(x=as.factor(niche),y=FTU)) +
+  geom_violin() +
+  geom_boxplot(width=0.15) +
+  ylab("Fraction of unused taxonomic units") +
+  xlab("Sample type") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r Figure S7 - FSUs}
+path = "D:/GitHub/TIFN/Homogenized data analysis/1. Tax4Fun2/TIFN_Tax4Fun_rarefied_10k_output/functional_prediction.txt"
+input_df = readRDS("1. Tax4Fun2/TIFN_Tax4Fun2_rarefied_annotated_10k.RDS") %>% as_tibble()
+input_df = input_df %>% select(sample,subject,visit,group,niche)
+input_df_indexed = input_df %>% mutate(consistent_index=1:nrow(.))
+output_df = read.csv(path, sep="\t", header=TRUE) %>% as_tibble()
+
+ko2name = output_df[,c(1,ncol(output_df))]
+colnames(ko2name) = c("KO", "description")
+ko2name = ko2name %>% as_tibble()
+
+output_df = output_df %>% select(-KO, -description)
+
+df = read.table("D:/GitHub/TIFN/Homogenized data analysis/1. Tax4Fun2/TIFN_Tax4Fun_rarefied_10k_output/logfile2.txt", sep=" ", skip=3)
+FTUs = df[1:1639,2]
+FSUs = df[1646:3284,2]
+
+df = cbind(input_df$niche, FSUs) %>% as_tibble()
+df$FSUs = as.numeric(df$FSUs)
+colnames(df) = c("niche", "FSU")
+
+df %>%
+  ggplot(aes(x=as.factor(niche),y=FSU)) +
+  geom_violin() +
+  geom_boxplot(width=0.15) +
+  ylab("Fraction of unused sequences") +
+  xlab("Sample type") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r Figure S8 - sparsity of KOs}
+tax4fun2_output = cbind(input_df, t(output_df)) %>% as_tibble()
+
+calcSparsity = function(nicheName, RFgroupNum){
+  df = tax4fun2_output %>%
+    as_tibble() %>%
+    filter(group == "control", niche == nicheName) %>%
+    left_join(rf) %>% 
+    filter(RFgroup==RFgroupNum) %>% 
+    select(-sample,-subject,-visit,-group,-niche,-RFgroup)
+  
+  result = colSums(df==0) / nrow(df)
+  return(result)
+}
+
+niches = c("tongue", "lower jaw, lingual", "lower jaw, interproximal", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+
+resultList = list()
+iterator = 1
+
+for(i in 1:length(niches)){
+  for(j in 0:2){
+    resultList[[iterator]] = calcSparsity(niches[i], j)
+    iterator = iterator + 1
+  }
+}
+
+temp = data.frame(matrix(unlist(resultList), nrow=length(resultList), byrow=TRUE))
+#colnames(temp) = colnames(microbiome.raw %>% as_tibble() %>% select(starts_with("ASV")))
+temp$RFgroup = rep(c("low", "mid", "high"), 6)
+temp$niche = rep(niches, each=3)
+df = temp %>% 
+  as_tibble() %>%
+  pivot_longer(-c(niche,RFgroup)) %>%
+  mutate(niche = as.factor(niche), RFgroup = factor(RFgroup, levels=c("low", "mid", "high")))
+
+df %>% ggplot(aes(x=value)) +
+  facet_grid(vars(niche), vars(RFgroup)) +
+  geom_histogram() +
+  scale_y_log10() +
+  geom_vline(xintercept=0.5, colour="red") +
+  xlab("Sparsity (%)") + 
+  ylab("Frequency")
+
+```
+
+```{r Figure S9 - variance per KO}
+tax4fun2_output = cbind(input_df, t(output_df)) %>% as_tibble()
+
+calcVariance = function(nicheName){
+  df = tax4fun2_output %>%
+    as_tibble() %>%
+    filter(group == "control", niche == nicheName) %>%
+    select(-sample,-subject,-visit,-group,-niche)
+  
+  totalSSQ = sum(df^2)
+  result = colSums(df^2) / totalSSQ * 100
+  return(result)
+}
+
+niches = c("tongue", "lower jaw, lingual", "lower jaw, interproximal", "upper jaw, lingual", "upper jaw, interproximal", "saliva")
+
+resultList = list()
+for(i in 1:length(niches)){
+  resultList[[i]] = calcVariance(niches[i])
+}
+
+temp = data.frame(matrix(unlist(resultList), nrow=length(resultList), byrow=TRUE))
+temp$niche = niches
+
+temp %>%
+  as_tibble() %>% 
+  pivot_longer(-niche) %>% 
+  ggplot(aes(x=value)) + 
+  facet_wrap(vars(niche)) +
+  geom_histogram(bins=50) +
+  scale_y_sqrt() +
+  geom_vline(xintercept=0.025, col="red") +
+  xlab("Sum of squares (% of total)") +
+  ylab("Frequency")
+```
+
+```{r Figures S10 to S22 - PARAFAC models}
+#skipped
+```
+
+```{r Figure S23 - ASV loading plots}
+# Run figure 2 and 3 to obtain the required variables
+plotFeatureClustering = function(model, filteredFeatures, featureClustering, title){
+  numComponents = ncol(model[[3]]) - 1
+  Btilde = correctPARAFACloadings(model, 2)
+  Btilde = Btilde[filteredFeatures$keep == TRUE,]
+  
+  if(numComponents==1){
+    plot = featureClustering %>% mutate(Component_1 = Btilde) %>% ggplot(aes(x=Component_1,y=0,col=as.factor(group))) + geom_point() + geom_vline(xintercept=0, linetype=2) + ggtitle(title) + xlab("Component 1") + ylab("Component 2") + scale_color_discrete(name="Cluster")
+  }
+  else{
+    plot = featureClustering %>% mutate(Component_1 = Btilde[,1], Component_2 = Btilde[,2]) %>% ggplot(aes(x=Component_1,y=Component_2,col=as.factor(group))) + geom_point() + geom_vline(xintercept=0, linetype=2) + geom_hline(yintercept=0, linetype=2) + ggtitle(title) + xlab("Component 1") + ylab("Component 2") + scale_color_discrete(name="Cluster")
+  }
+  
+  return(plot)
+}
+
+a = plotFeatureClustering(tongueModel, tongueFilteredFeatures, tongueFeatureClustering, "Tongue")
+b = plotFeatureClustering(lowlingModel, lowlingFilteredFeatures, lowlingFeatureClustering, "Lower jaw lingual")
+c = plotFeatureClustering(lowinterModel, lowinterFilteredFeatures, lowinterFeatureClustering, "Lower jaw interproximal")
+d = plotFeatureClustering(uplingModel, uplingFilteredFeatures, uplingFeatureClustering, "Upper jaw lingual")
+e = plotFeatureClustering(upinterModel, upinterFilteredFeatures, upinterFeatureClustering, "Upper jaw interproximal")
+f = plotFeatureClustering(salivaModel, salivaFilteredFeatures, salivaFeatureClustering, "Saliva")
+ggarrange(a,b,d,e,f)
+```
+
+```{r Figure S24 - Subject loading plots}
+plotSubjectClustering = function(model, title){
+  numComponents = ncol(model[[3]]) - 1
+  Atilde = correctPARAFACloadings(model, 1)
+  
+  if(numComponents==1){
+    plot = model[[1]]  %>% mutate(Component_1 = Atilde) %>% ggplot(aes(x=Component_1,y=0)) + geom_point() + geom_vline(xintercept=0, linetype=2) + ggtitle(title) + xlab("Component 1") + ylab("Component 2")
+  }
+  else{
+    plot = model[[1]]  %>% mutate(Component_1 = Atilde[,1], Component_2 = Atilde[,2]) %>% ggplot(aes(x=Component_1,y=Component_2)) + geom_point() + geom_vline(xintercept=0, linetype=2) + geom_hline(yintercept=0, linetype=2) + ggtitle(title) + xlab("Component 1") + ylab("Component 2")
+  }
+  
+  return(plot)
+}
+
+a = plotSubjectClustering(tongueModel, "Tongue")
+b = plotSubjectClustering(lowlingModel, "Lower jaw lingual")
+c = plotSubjectClustering(lowinterModel, "Lower jaw interproximal")
+d = plotSubjectClustering(uplingModel, "Upper jaw lingual")
+e = plotSubjectClustering(upinterModel, "Upper jaw interproximal")
+f = plotSubjectClustering(salivaModel, "Saliva")
+g = plotSubjectClustering(metabolomicsModel, "Metabolomics")
+ggarrange(a,b,d,e,f, nrow=3, ncol=2)
+```
+
+```{r Figure S25 - Inter intra variation}
+varexp_timepoints = function(model){
+  result = 1:nrow(model[[3]])
+  
+  for(i in 1:nrow(model[[3]])){
+    varExp = sum((model[[4]] %>% select(ends_with(paste0("_t",i))))^2, na.rm=TRUE) / sum((model[[5]] %>% select(ends_with(paste0("_t",i))))^2, na.rm=TRUE)
+    result[i] = varExp
+  }
+  
+  result = cbind(model[[3]]$days, result) %>% as_tibble()
+  colnames(result) = c("days", "varExps")
+  return(result)
+}
+
+tongueTimeVarExps = varexp_timepoints(tongueModel)
+lowlingTimeVarExps = varexp_timepoints(lowlingModel)
+lowinterTimeVarExps = varexp_timepoints(lowinterModel)
+uplingTimeVarExps = varexp_timepoints(uplingModel)
+upinterTimeVarExps = varexp_timepoints(upinterModel)
+salivaTimeVarExps = varexp_timepoints(salivaModel)
+metabolomicsTimeVarExps = varexp_timepoints(metabolomicsModel)
+
+varexp_subjects = function(model){
+  varExps = apply(model[[4]]^2, 1, function(x){sum(x, na.rm=TRUE)}) / apply(model[[5]]^2, 1,  function(x){sum(x, na.rm=TRUE)})
+  result = cbind(model[[1]]$subject, varExps) %>% as_tibble()
+  result$varExps = as.numeric(result$varExps)
+  colnames(result) = c("subject", "varExps")
+  return(result)
+}
+
+tongueSubjectVarExps = varexp_subjects(tongueModel)
+lowlingSubjectVarExps = varexp_subjects(lowlingModel)
+lowinterSubjectVarExps = varexp_subjects(lowinterModel)
+uplingSubjectVarExps = varexp_subjects(uplingModel)
+upinterSubjectVarExps = varexp_subjects(upinterModel)
+salivaSubjectVarExps = varexp_subjects(salivaModel)
+metabolomicsSubjectVarExps = varexp_subjects(metabolomicsModel)
+
+tongueModelVarExp = sum(tongueModel[[6]]^2, na.rm=TRUE) / sum(tongueModel[[7]]^2, na.rm=TRUE)
+lowlingModelVarExp = sum(lowlingModel[[6]]^2, na.rm=TRUE) / sum(lowlingModel[[7]]^2, na.rm=TRUE)
+lowinterModelVarExp = sum(lowinterModel[[6]]^2, na.rm=TRUE) / sum(lowinterModel[[7]]^2, na.rm=TRUE)
+uplingModelVarExp = sum(uplingModel[[6]]^2, na.rm=TRUE) / sum(uplingModel[[7]]^2, na.rm=TRUE)
+upinterModelVarExp = sum(upinterModel[[6]]^2, na.rm=TRUE) / sum(upinterModel[[7]]^2, na.rm=TRUE)
+salivaModelVarExp = sum(salivaModel[[6]]^2, na.rm=TRUE) / sum(salivaModel[[7]]^2, na.rm=TRUE)
+
+subjectVarExps = rbind(tongueSubjectVarExps %>%
+                         mutate(varExps = varExps / tongueModelVarExp),
+                       lowlingSubjectVarExps %>%
+                         mutate(varExps = varExps / lowlingModelVarExp),
+                       lowinterSubjectVarExps %>%
+                         mutate(varExps = varExps / lowinterModelVarExp),
+                       uplingSubjectVarExps %>%
+                         mutate(varExps = varExps / uplingModelVarExp),
+                       upinterSubjectVarExps %>%
+                         mutate(varExps = varExps / upinterModelVarExp),
+                       salivaSubjectVarExps %>%
+                         mutate(varExps = varExps / salivaModelVarExp)) %>%
+  as_tibble() %>%
+  mutate(niche = rep(c("tongue", "lower jaw lingual", "lower jaw interproximal", "upper jaw lingual", "upper jaw interproximal", "saliva"), each=41))
+
+subjectResult = subjectVarExps %>% group_by(as.factor(niche)) %>% summarize(m=median(varExps), s=mad(varExps))
+colnames(subjectResult) = c("niche", "sMean", "sSd")
+
+timeVarExps = rbind(tongueTimeVarExps %>%
+                         mutate(varExps = varExps / tongueModelVarExp),
+                       lowlingTimeVarExps %>%
+                         mutate(varExps = varExps / lowlingModelVarExp),
+                       lowinterTimeVarExps %>%
+                         mutate(varExps = varExps / lowinterModelVarExp),
+                       uplingTimeVarExps %>%
+                         mutate(varExps = varExps / uplingModelVarExp),
+                       upinterTimeVarExps %>%
+                         mutate(varExps = varExps / upinterModelVarExp),
+                       salivaTimeVarExps %>%
+                         mutate(varExps = varExps / salivaModelVarExp)) %>%
+  as_tibble() %>%
+  mutate(niche = rep(c("tongue", "lower jaw lingual", "lower jaw interproximal", "upper jaw lingual", "upper jaw interproximal", "saliva"), each=7))
+
+timeResult = timeVarExps %>% group_by(as.factor(niche)) %>% summarize(m=median(varExps), mad=sd(varExps))
+colnames(timeResult) = c("niche", "tMean", "tSd")
+
+df = subjectResult %>% left_join(timeResult)
+df %>%
+  ggplot(aes(x=sMean,y=tMean,xmin=sMean-sSd,xmax=sMean+sSd,ymin=tMean-tSd,ymax=tMean+tSd, label=niche)) +
+  geom_point() +
+  geom_abline(slope=1,intercept=0) +
+  geom_errorbar() +
+  geom_errorbarh() +
+  geom_label_repel()
+
+a = subjectVarExps %>%
+  ggplot(aes(x=as.factor(niche),y=varExps)) +
+  geom_boxplot(width=0.25) +
+  geom_hline(yintercept=1,col="red") +
+  ggtitle("Intra-individual variation explained") +
+  xlab("Sampling location") +
+  ylab("Normalized variance explained")
+
+b = timeVarExps %>% 
+  ggplot(aes(x=as.factor(niche),y=varExps)) +
+  geom_boxplot(width=0.25) +
+  geom_hline(yintercept=1,col="red") +
+  ggtitle("Inter-individual variation explained") +
+  xlab("Sampling location") +
+  ylab("Normalized variance explained")
+
+ggarrange(a,b,nrow=2)
+
+rbind(subjectVarExps %>%
+        mutate(type="Within subjects") %>% select(-subject), timeVarExps %>% 
+        mutate(type="Between subjects") %>% select(-days)) %>%
+  ggplot(aes(x=as.factor(type),y=varExps)) + 
+  facet_grid(~as.factor(niche)) +
+  geom_boxplot(outlier.shape=NA) +
+  ylim(0,3.5) +
+  ylab("Normalized variance explained") +
+  xlab("Type of variation")
+
+rbind(subjectVarExps %>% mutate(type="Within subjects") %>% select(-subject), timeVarExps %>% mutate(type="Between subjects") %>% select(-days)) %>%
+  ggplot(aes(x=as.factor(type),y=varExps)) +
+  geom_violin() +
+  geom_boxplot(width=0.15) +
+  #stat_compare_means(method="wilcox.test", method.args=list(alternative="greater")) +
+  ylim(0, 7) +
+  ylab("Normalized variance explained") +
+  xlab("Type of variation")
+```
+
+```{r Figure S26 - pathway size histogram}
+KO2pathway %>% select(pathway) %>% table() %>% as_tibble() %>% ggplot(aes(x=n)) + geom_histogram() + scale_y_log10() + xlab("Number of KOs per pathway") + ylab("Frequency") + geom_vline(xintercept=750, colour="red")
+```
+
+```{r Figure S27 - elbow plots}
+library(cluster)
+library(factoextra)
+
+plotClusteringDiagnostics = function(model, filteredFeatures){
+  selectedFeatures = filteredFeatures %>% filter(keep==TRUE) %>% select(featureName) %>% pull()
+  Xhat = model[[6]] %>% select(all_of(selectedFeatures))
+  
+  a = fviz_nbclust(t(Xhat), pam, method="wss")
+  b = fviz_nbclust(t(Xhat), pam, method="silhouette")
+  c = fviz_nbclust(t(Xhat), pam, method="gap_stat")
+  return(list(a,b,c))
+}
+
+p1 = plotClusteringDiagnostics(tongueModel, tongueFilteredFeatures)
+p2 = plotClusteringDiagnostics(lowlingModel, lowlingFilteredFeatures)
+p3 = plotClusteringDiagnostics(lowinterModel, lowinterFilteredFeatures)
+p4 = plotClusteringDiagnostics(uplingModel, uplingFilteredFeatures)
+p5 = plotClusteringDiagnostics(upinterModel, upinterFilteredFeatures)
+p6 = plotClusteringDiagnostics(salivaModel, salivaFilteredFeatures)
+ggarrange(p1[[1]], p2[[1]], p3[[1]], p4[[1]], p5[[1]], p6[[1]], p1[[2]], p2[[2]], p3[[2]], p4[[2]], p5[[2]], p6[[2]], p1[[3]], p2[[3]], p3[[3]], p4[[3]], p5[[3]], p6[[3]], nrow=3, ncol=6)
+
+p7 = plotClusteringDiagnostics(metabolomicsModel, metabolomicsFilteredFeatures)
+p7[[1]]
+p7[[2]]
+p7[[3]]
+```
+
+```{r Figure S28 - varexp congruence score dropoff}
+loadCongruences = function(path, nameVector){
+  df = read.csv(path, header=FALSE)
+  numComponents = ncol(df)
+  
+  colnames(df) = paste0("Congruence_", 1:numComponents)
+  row.names(df) = nameVector
+  return(df)
+}
+
+tongueFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Tongue_func_feature_congruence_loadings.csv", tongueFuncModel[[2]]$KO)
+lowlingFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Low_ling_func_feature_congruence_loadings.csv", lowlingFuncModel[[2]]$KO)
+lowinterFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Low_inter_func_feature_congruence_loadings.csv", lowinterFuncModel[[2]]$KO)
+uplingFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Up_ling_func_feature_congruence_loadings.csv", uplingFuncModel[[2]]$KO)
+upinterFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Up_inter_func_feature_congruence_loadings.csv", upinterFuncModel[[2]]$KO)
+salivaFeatureCongruences = loadCongruences("./9. Functional enrichment analysis/20230607_run/Saliva_func_feature_congruence_loadings.csv", salivaFuncModel[[2]]$KO)
+metabolomicsFeatureCongruences = loadCongruences("./8. Mutually exclusive microbiomes/20230605_run/Metabolomics_feature_congruence_loadings.csv", metabolomicsModel[[2]]$BIOCHEMICAL)
+
+varexp_features = function(model, featureNameColumnName){
+  varExps = apply(model[[6]]^2, 2, function(x){sum(x, na.rm=TRUE)}) / apply(model[[7]]^2, 2, function(x){sum(x, na.rm=TRUE)})
+  result = cbind(model[[2]][featureNameColumnName] %>% pull(), varExps) %>% as_tibble()
+  result$varExps = as.numeric(result$varExps)
+  colnames(result) = c(featureNameColumnName, "varExps")
+  return(result)
+}
+
+tongueFeatureVarExps = varexp_features(tongueFuncModel, "KO")
+lowlingFeatureVarExps = varexp_features(lowlingFuncModel, "KO")
+lowinterFeatureVarExps = varexp_features(lowinterFuncModel, "KO")
+uplingFeatureVarExps = varexp_features(uplingFuncModel, "KO")
+upinterFeatureVarExps = varexp_features(upinterFuncModel, "KO")
+salivaFeatureVarExps = varexp_features(salivaFuncModel, "KO")
+metabolomicsFeatureVarExps = varexp_features(metabolomicsModel, "BIOCHEMICAL")
+
+tongueFeatureMetrics = cbind(tongueFeatureVarExps, tongueFeatureCongruences) %>% as_tibble()
+lowlingFeatureMetrics = cbind(lowlingFeatureVarExps, lowlingFeatureCongruences) %>% as_tibble()
+lowinterFeatureMetrics = cbind(lowinterFeatureVarExps, lowinterFeatureCongruences) %>% as_tibble()
+uplingFeatureMetrics = cbind(uplingFeatureVarExps, uplingFeatureCongruences) %>% as_tibble()
+upinterFeatureMetrics = cbind(upinterFeatureVarExps, upinterFeatureCongruences) %>% as_tibble()
+salivaFeatureMetrics = cbind(salivaFeatureVarExps, salivaFeatureCongruences) %>% as_tibble()
+
+metabolomicsFeatureMetrics = cbind(metabolomicsFeatureVarExps, metabolomicsFeatureCongruences) %>% as_tibble()
+
+metabolomicsVarExp = 0.226
+
+uniteOutput = function(funcModel, funcFeatureMetrics, metabolomicsFeatureMetrics){
+  modelledData = funcModel[[6]]
+  inputData = funcModel[[7]]
+  modelVarExp = sum(modelledData^2, na.rm=TRUE) / sum(inputData^2, na.rm=TRUE)
+  numComponents = ncol(funcModel[[3]]) - 1
+  
+  if(numComponents == 1){
+    partA = funcFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = abs(Congruence_1), geneID = KO) %>% mutate(congruence = congruence / max(congruence)) %>% select(geneID, varExps, congruence) %>% arrange(congruence, varExps)
+  }
+  else{
+    unifiedCongruences = funcFeatureMetrics %>% select(Congruence_1, Congruence_2)
+    unifiedCongruences = abs(unifiedCongruences)
+    unifiedCongruences = apply(unifiedCongruences, 1, function(x){max(x[1], x[2])})
+    partA = funcFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = unifiedCongruences, geneID = KO) %>% mutate(congruence = congruence / max(congruence)) %>% select(geneID, varExps, congruence)
+  }
+  
+  partB = metabolomicsFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = max(abs(Congruence_1), abs(Congruence_2))) %>% mutate(congruence = congruence / max(congruence)) %>% left_join(metabolomics.features) %>% filter(KEGG != "NA") %>% mutate(geneID = KEGG) %>% select(geneID, varExps, congruence)
+  
+  scores = rbind(partA, partB) %>% as_tibble() %>% select(varExps, congruence)
+  scores = apply(scores, 1, mean)
+  result = rbind(partA, partB) %>% mutate(score = scores) %>% arrange(desc(score), desc(congruence), desc(varExps))
+}
+
+tongueSetRankInput = uniteOutput(tongueFuncModel, tongueFeatureMetrics, metabolomicsFeatureMetrics)
+lowlingSetRankInput = uniteOutput(lowlingFuncModel, lowlingFeatureMetrics, metabolomicsFeatureMetrics)
+lowinterSetRankInput = uniteOutput(lowinterFuncModel, lowinterFeatureMetrics, metabolomicsFeatureMetrics)
+uplingSetRankInput = uniteOutput(uplingFuncModel, uplingFeatureMetrics, metabolomicsFeatureMetrics)
+upinterSetRankInput = uniteOutput(upinterFuncModel, upinterFeatureMetrics, metabolomicsFeatureMetrics)
+salivaSetRankInput = uniteOutput(salivaFuncModel, salivaFeatureMetrics, metabolomicsFeatureMetrics)
+
+a = tongueSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Tongue") + xlab("Normalized index") + ylab("Score")
+b = lowlingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Lower jaw lingual") + xlab("Normalized index") + ylab("Score")
+c = lowinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Lower jaw, interproximal") + xlab("Normalized index") + ylab("Score")
+d = uplingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Upper jaw, lingual") + xlab("Normalized index") + ylab("Score")
+e = upinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Upper jaw, interproximal") + xlab("Normalized index") + ylab("Score")
+f = salivaSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line() + geom_vline(xintercept=0.75, col="red") + ggtitle("Saliva") + xlab("Normalized index") + ylab("Score")
+ggarrange(a,b,c,d,e,f, nrow=3, ncol=2)
+```
+
+```{r Table Sx - pathway enrichment p-values}
+temp = plottableData %>% select(description, correctedPValue, niche) %>% pivot_wider(names_from=niche,values_from=correctedPValue)
+```

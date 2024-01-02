@@ -1,0 +1,2105 @@
+---
+title: "TIFN_integrated_analysis"
+author: "Roel van der Ploeg"
+date: "12/09/2022"
+output: html_document
+---
+
+## Requirements
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(ggpubr)
+
+source("../R scripts/summary.functions.R")
+source("../R scripts/PARAFAC_functions.R")
+set.seed(0)
+```
+
+```{r Import red fluorescence data}
+rf_data = read.csv("../0. Raw data input/RFdata.csv")
+colnames(rf_data) = c("subject", "id", "fotonr", "day", "group", "RFgroup", "MQH", "SPS(tm)", "Area_delta_R30", "Area_delta_Rmax", "Area_delta_R30_x_Rmax", "gingiva_mean_R_over_G", "gingiva_mean_R_over_G_upper_jaw", "gingiva_mean_R_over_G_lower_jaw")
+rf_data = rf_data %>% as_tibble()
+
+rf_data[rf_data$subject == "VSTPHZ", 1] = "VSTPH2"
+rf_data[rf_data$subject == "D2VZH0", 1] = "DZVZH0"
+rf_data[rf_data$subject == "DLODNN", 1] = "DLODDN"
+rf_data[rf_data$subject == "O3VQFX", 1] = "O3VQFQ"
+rf_data[rf_data$subject == "F80LGT", 1] = "F80LGF"
+rf_data[rf_data$subject == "26QQR0", 1] = "26QQrO"
+
+rf_data2 = read.csv("../0. Raw data input/red_fluorescence_data.csv") %>% as_tibble()
+rf_data2 = rf_data2[,c(2,4,181:192)]
+rf_data = rf_data %>% left_join(rf_data2)
+
+rf = rf_data %>% select(subject, RFgroup) %>% unique()
+```
+
+```{r Import subject metadata}
+age_gender = read.csv("../0. Raw data input/20160210 demografische gegevens TIFN2.csv", sep=";")
+age_gender = age_gender[2:nrow(age_gender),2:ncol(age_gender)]
+age_gender = age_gender %>% as_tibble() %>% filter(onderzoeksgroep == 0) %>% select(naam, leeftijd, geslacht)
+colnames(age_gender) = c("subject", "age", "gender")
+
+# Correction for incorrect subject ids
+age_gender[age_gender$subject == "VSTPHZ", 1] = "VSTPH2"
+age_gender[age_gender$subject == "D2VZH0", 1] = "DZVZH0"
+age_gender[age_gender$subject == "DLODNN", 1] = "DLODDN"
+age_gender[age_gender$subject == "O3VQFX", 1] = "O3VQFQ"
+age_gender[age_gender$subject == "F80LGT", 1] = "F80LGF"
+age_gender[age_gender$subject == "26QQR0", 1] = "26QQrO"
+
+age_gender = age_gender %>% arrange(subject)
+```
+
+```{r Import KO mappings}
+# Mapping of KO K-number to pathways
+KO2pathway = read.csv("../4. Functional microbiome pre-processing/kegg_ko2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(KO2pathway) = c("pathway", "KO")
+dummy = unlist(strsplit(KO2pathway["KO"] %>% pull, "ko:"))
+KO2pathway["KO"] = dummy[dummy != ""]
+
+# Mapping of pathway ID to pathway name
+pathway2name = read.csv("../4. Functional microbiome pre-processing/kegg_pathwayNames.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(pathway2name) = c("pathway", "name")
+#pathway2name2 = pathway2name
+#pathway2name2$pathway = str_replace(pathway2name$pathway, "map", "ko")
+
+# Mapping of compound to pathway
+compound2pathway = read.csv("../4. Functional microbiome pre-processing/kegg_compound2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(compound2pathway) = c("pathway", "compound")
+dummy = unlist(strsplit(compound2pathway["compound"] %>% pull, "cpd:"))
+compound2pathway["compound"] = dummy[dummy != ""]
+```
+
+```{r Import microbiome data}
+microbiome.raw = read.csv("../0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+taxa = read.csv("../0. Raw data input/20221005_wp2/taxonomic-classification.tsv", sep="\t")
+selectedIndividuals = microbiome.raw %>% as_tibble() %>% filter(group == "control") %>% select(subject) %>% pull %>% unique
+```
+
+```{r Import metabolomics data}
+metabolomics.raw = read.csv("../0. Raw data input/20221005_wp2/metabolomics.tsv", sep="\t")
+metabolomics.raw.notest = metabolomics.raw %>% as_tibble() %>% filter(subject %in% selectedIndividuals)
+metabolomics.features = read.csv("../0. Raw data input/20221005_wp2/metabolomics-features.tsv", sep="\t")
+```
+
+```{r Import models}
+microb_featureNames = c("KO", "description")
+metab_featureNames = c("SUPER_PATHWAY","SUB_PATHWAY","BIOCHEMICAL")
+microb_days = c(-14,0,2,5,9,14,21)
+metab_days = c(0,2,5,9,14)
+
+path = "../7. Functional microbiome modeling/20230607_run/PARAFAC models/"
+
+tongueFuncModel = importPARAFAC(paste0(path,"Tongue_func"), microb_featureNames, microb_days, "KO")
+lowlingFuncModel = importPARAFAC(paste0(path,"Low_ling_func"), microb_featureNames, microb_days, "KO")
+lowinterFuncModel = importPARAFAC(paste0(path,"Low_inter_func"), microb_featureNames, microb_days, "KO")
+uplingFuncModel = importPARAFAC(paste0(path,"Up_ling_func"), microb_featureNames, microb_days, "KO")
+upinterFuncModel = importPARAFAC(paste0(path,"Up_inter_func"), microb_featureNames, microb_days, "KO")
+salivaFuncModel = importPARAFAC(paste0(path, "Saliva_func"), microb_featureNames, microb_days, "KO")
+
+metabolomicsModel = importPARAFAC("../6. Metabolome modeling/20230605_run/PARAFAC models/Metabolomics", metab_featureNames, metab_days, "BIOCHEMICAL")
+```
+
+```{r load feature congruences}
+loadCongruences = function(path, nameVector){
+  df = read.csv(path, header=FALSE)
+  numComponents = ncol(df)
+  
+  colnames(df) = paste0("Congruence_", 1:numComponents)
+  row.names(df) = nameVector
+  return(df)
+}
+
+tongueFeatureCongruences = loadCongruences("./20230607_run/Tongue_func_feature_congruence_loadings.csv", tongueFuncModel[[2]]$KO)
+lowlingFeatureCongruences = loadCongruences("./20230607_run/Low_ling_func_feature_congruence_loadings.csv", lowlingFuncModel[[2]]$KO)
+lowinterFeatureCongruences = loadCongruences("./20230607_run/Low_inter_func_feature_congruence_loadings.csv", lowinterFuncModel[[2]]$KO)
+uplingFeatureCongruences = loadCongruences("./20230607_run/Up_ling_func_feature_congruence_loadings.csv", uplingFuncModel[[2]]$KO)
+upinterFeatureCongruences = loadCongruences("./20230607_run/Up_inter_func_feature_congruence_loadings.csv", upinterFuncModel[[2]]$KO)
+salivaFeatureCongruences = loadCongruences("./20230607_run/Saliva_func_feature_congruence_loadings.csv", salivaFuncModel[[2]]$KO)
+metabolomicsFeatureCongruences = loadCongruences("../8. Mutually exclusive microbiomes/20230605_run/Metabolomics_feature_congruence_loadings.csv", metabolomicsModel[[2]]$BIOCHEMICAL)
+```
+
+```{r calculate feature variances explained}
+varexp_features = function(model, featureNameColumnName){
+  varExps = apply(model[[6]]^2, 2, function(x){sum(x, na.rm=TRUE)}) / apply(model[[7]]^2, 2, function(x){sum(x, na.rm=TRUE)})
+  result = cbind(model[[2]][featureNameColumnName] %>% pull(), varExps) %>% as_tibble()
+  result$varExps = as.numeric(result$varExps)
+  colnames(result) = c(featureNameColumnName, "varExps")
+  return(result)
+}
+
+tongueFeatureVarExps = varexp_features(tongueFuncModel, "KO")
+lowlingFeatureVarExps = varexp_features(lowlingFuncModel, "KO")
+lowinterFeatureVarExps = varexp_features(lowinterFuncModel, "KO")
+uplingFeatureVarExps = varexp_features(uplingFuncModel, "KO")
+upinterFeatureVarExps = varexp_features(upinterFuncModel, "KO")
+salivaFeatureVarExps = varexp_features(salivaFuncModel, "KO")
+metabolomicsFeatureVarExps = varexp_features(metabolomicsModel, "BIOCHEMICAL")
+```
+
+```{r create a unified list of varexp and congruence per model}
+tongueFeatureMetrics = cbind(tongueFeatureVarExps, tongueFeatureCongruences) %>% as_tibble()
+lowlingFeatureMetrics = cbind(lowlingFeatureVarExps, lowlingFeatureCongruences) %>% as_tibble()
+lowinterFeatureMetrics = cbind(lowinterFeatureVarExps, lowinterFeatureCongruences) %>% as_tibble()
+uplingFeatureMetrics = cbind(uplingFeatureVarExps, uplingFeatureCongruences) %>% as_tibble()
+upinterFeatureMetrics = cbind(upinterFeatureVarExps, upinterFeatureCongruences) %>% as_tibble()
+salivaFeatureMetrics = cbind(salivaFeatureVarExps, salivaFeatureCongruences) %>% as_tibble()
+
+metabolomicsFeatureMetrics = cbind(metabolomicsFeatureVarExps, metabolomicsFeatureCongruences) %>% as_tibble()
+```
+
+```{r diagnostics - varexps}
+plotVarExpDistr = function(df, model){
+  modelVarExp = sum(model[[6]]^2, na.rm=TRUE) / sum(model[[7]]^2, na.rm=TRUE)
+  plot = df %>% ggplot(aes(x=varExps)) + geom_histogram() + geom_vline(xintercept=modelVarExp, col="red")
+  return(plot)
+}
+
+a=plotVarExpDistr(tongueFeatureMetrics, tongueFuncModel)
+b=plotVarExpDistr(lowlingFeatureMetrics, lowlingFuncModel)
+c=plotVarExpDistr(lowinterFeatureMetrics, lowinterFuncModel)
+d=plotVarExpDistr(uplingFeatureMetrics, uplingFuncModel)
+e=plotVarExpDistr(upinterFeatureMetrics, upinterFuncModel)
+f=plotVarExpDistr(salivaFeatureMetrics, salivaFuncModel)
+ggarrange(a,b,c,d,e,f)
+
+plotVarExpDistr(metabolomicsFeatureMetrics, metabolomicsModel)
+```
+
+```{r diagnostics normalized var exp}
+plotVarExpNormBoxplot = function(model_list, model_names){
+  result = tibble()
+  
+  for(i in 1:length(model_list)){
+    model = model_list[[i]]
+    modelVarExp = sum(model[[6]]^2, na.rm=TRUE) / sum(model[[7]]^2, na.rm=TRUE)
+    varExps = apply(model[[6]]^2, 2, function(x){sum(x, na.rm=TRUE)}) / apply(model[[7]]^2, 2, function(x){sum(x, na.rm=TRUE)})
+    normalizedVarExps = (varExps / modelVarExp) %>% as_tibble() %>% mutate(niche = model_names[i])
+    result = rbind(result, normalizedVarExps)
+  }
+  
+  result %>% ggplot(aes(x=as.factor(niche), y=value)) + geom_boxplot()
+}
+
+model_names = c("tongue", "lowling", "lowinter", "upling", "upinter", "saliva", "metabolomics")
+model_list = list(tongueFuncModel, lowlingFuncModel, lowinterFuncModel, uplingFuncModel, upinterFuncModel, salivaFuncModel, metabolomicsModel)
+plotVarExpNormBoxplot(model_list, model_names)
+```
+
+```{r diagnostics - congruences}
+congruencePlot_features = function(congruenceOutput, model, title){
+  numComponents = ncol(congruenceOutput)
+  modelledData = model[[6]]
+  inputData = model[[7]]
+  
+  modelVarExp = sum(modelledData^2, na.rm=TRUE) / sum(inputData^2, na.rm=TRUE)
+  featureVarExp = apply(modelledData^2, 2, function(x){sum(x, na.rm=TRUE)}) / apply(inputData^2, 2, function(x){sum(x, na.rm=TRUE)})
+  
+  square_small = matrix(c(-0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, -0.5), nrow=5, ncol=2) %>% as_tibble()
+  colnames(square_small) = c("x", "y")
+  
+  square_large = matrix(c(-1,-1,1,1,-1,-1,1,1,-1,-1), nrow=5, ncol=2) %>% as_tibble()
+  colnames(square_large) = c("x", "y")
+  
+  data = congruenceOutput %>% as_tibble() %>% mutate(normVarExp = (featureVarExp / modelVarExp) - 1)
+  
+  if(numComponents == 2){
+    plot = ggplot() + geom_point(data=data, aes(x=Congruence_1,y=Congruence_2,col=normVarExp)) + xlim(-1,1) + ylim(-1,1) + geom_path(aes(x=x,y=y), data=square_small) + geom_path(aes(x=x,y=y), data=square_large) + ggtitle(title)
+  }
+  else{
+    plot = ggplot() + geom_point(data=data, aes(x=Congruence_1,y=0,col=normVarExp)) + xlim(-1,1) + ylim(-1,1) + geom_vline(xintercept=0.5) + geom_vline(xintercept=-0.5) + geom_vline(xintercept=1) + geom_vline(xintercept=-1) + ggtitle(title)
+  }
+  
+  return(plot)
+  
+}
+
+a = congruencePlot_features(tongueFeatureCongruences, tongueFuncModel, "tongue")
+b = congruencePlot_features(lowlingFeatureCongruences, lowlingFuncModel, "lowling")
+c = congruencePlot_features(lowinterFeatureCongruences, lowinterFuncModel, "lowinter")
+d = congruencePlot_features(uplingFeatureCongruences, uplingFuncModel, "upling")
+e = congruencePlot_features(upinterFeatureCongruences, upinterFuncModel, "upinter")
+f = congruencePlot_features(salivaFeatureCongruences, salivaFuncModel, "saliva")
+ggarrange(a,b,c,d,e,f)
+
+congruencePlot_features(metabolomicsFeatureCongruences, metabolomicsModel, "metabolomics")
+```
+
+```{r Hyper Geometric test of pathway significance functions}
+pathwayGeomTest_combined = function(funcModel, metabolomicsModel, functionalMetrics, metabolomicsMetrics, maxIterations){
+  KOmappings = KO2pathway %>% select(KO) %>% table() %>% as_tibble()
+  colnames(KOmappings) = c("KO", "n")
+  maxMappingsA = KOmappings %>% arrange(desc(n)) %>% select(n) %>% pull %>% unique
+  metaboliteMappings = compound2pathway %>% select(compound) %>% table() %>% as_tibble()
+  colnames(metaboliteMappings) = c("compound", "n")
+  maxMappingsB = metaboliteMappings %>% arrange(desc(n)) %>% select(n) %>% pull %>% unique
+
+  numComponents = ncol(funcModel[[3]]) - 1
+  
+  if(numComponents == 1){
+    annotatedFunctionalMetrics = functionalMetrics %>% mutate(Congruence_1 = abs(Congruence_1)) %>% left_join(KO2pathway) %>% left_join(pathway2name) %>% filter(name != "NA") %>% arrange(desc(Congruence_1), desc(varExps))
+  }
+  else{
+    annotatedFunctionalMetrics = functionalMetrics %>% mutate(Congruence_1 = abs(Congruence_1), Congruence_2 = abs(Congruence_2)) %>% left_join(KO2pathway) %>% left_join(pathway2name) %>% filter(name != "NA") %>% arrange(desc(Congruence_1), desc(Congruence_2), desc(varExps))
+  }
+  
+  annotatedMetaboliteMetrics = metabolomicsFeatureMetrics %>% mutate(Congruence_1 = abs(Congruence_1), Congruence_2 = abs(Congruence_2)) %>% left_join(metabolomics.features) %>% select(varExps, Congruence_1, Congruence_2, BIOCHEMICAL, KEGG) %>% filter(KEGG != "NA") %>% mutate(compound = KEGG) %>% select(-KEGG) %>% left_join(compound2pathway) %>% left_join(pathway2name) %>% filter(name != "NA") %>% arrange(desc(Congruence_1), desc(Congruence_2), desc(varExps))
+  
+  maxMappings = c(maxMappingsA, maxMappingsB) %>% as_tibble() %>% arrange(desc(value)) %>% unique() %>% pull
+  if(maxIterations >= length(maxMappings)){
+    iterations = 1:length(maxMappings)
+  }
+  else{
+    iterations = seq(from=1,to=length(maxMappings),by=round(length(maxMappings)/maxIterations))
+  }
+  
+  overallResult = list()
+  overallResult[[1]] = maxMappings[iterations]
+  
+  for (i in 1:length(iterations)){
+    mappingMaximum = maxMappings[iterations[i]]
+    print(mappingMaximum)
+    
+    # Filter KOs and determine success cases
+    excludeKOs = KOmappings %>% filter(n > mappingMaximum) %>% select("KO") %>% pull
+    annotatedFunctionalMetrics_filtered = annotatedFunctionalMetrics %>% filter(!(KO %in% excludeKOs))
+    numKOsuccesses = round(0.1 * length(annotatedFunctionalMetrics_filtered$KO %>% unique))
+    KOsuccess = annotatedFunctionalMetrics_filtered %>% select(KO) %>% unique()
+    KOsuccess = KOsuccess[1:numKOsuccesses,] %>% as_tibble() %>% select(KO) %>% pull()
+    
+    # Filter metabolites and determine success cases
+    excludeMetabolites = metaboliteMappings %>% filter(n > mappingMaximum) %>% select("compound") %>% pull
+    annotatedMetaboliteMetrics_filtered = annotatedMetaboliteMetrics %>% filter(!(compound %in% excludeMetabolites))
+    numMetaboliteSuccesses = round(0.1 * length(annotatedMetaboliteMetrics_filtered$compound %>% unique))
+    metaboliteSuccess = annotatedMetaboliteMetrics_filtered %>% select(compound) %>% unique()
+    metaboliteSuccess = metaboliteSuccess[1:numMetaboliteSuccesses,] %>% as_tibble() %>% select(compound) %>% pull()
+    
+    # Establish hypergeometric test parameters
+    totalN = length(annotatedFunctionalMetrics_filtered$KO %>% unique) + length(annotatedMetaboliteMetrics_filtered$compound %>% unique)
+    m = numKOsuccesses + numMetaboliteSuccesses
+    n = totalN - m
+    
+    # Calculate p-value per pathway
+    pathwayNames = unique(c(annotatedFunctionalMetrics_filtered$name, annotatedMetaboliteMetrics_filtered$name))
+    result = 1:length(pathwayNames)
+    for (j in 1:length(pathwayNames)){
+      pathwayName = pathwayNames[j]
+      df_func = annotatedFunctionalMetrics_filtered %>% filter(name == pathwayName)
+      df_metab = annotatedMetaboliteMetrics_filtered %>% filter(name == pathwayName)
+      success_func = df_func %>% filter(KO %in% KOsuccess)
+      success_metab = df_metab %>% filter(compound %in% metaboliteSuccess)
+      k = dim(df_func)[1] + dim(df_metab)[1]
+      q = dim(success_func)[1] + dim(success_metab)[1]
+      p = phyper(q, m, n, k)
+      result[j] = p
+    }
+
+    hyperGeomResult = cbind(pathwayNames, result) %>% as_tibble()
+    hyperGeomResult$result = as.numeric(hyperGeomResult$result)
+    colnames(hyperGeomResult) = c("pathway", "p-value")
+    overallResult[[i+1]] = hyperGeomResult
+  }
+  
+  return(overallResult)
+}
+
+postprocessHyperGeomResult = function(HyperGeomResult){
+  thresholds = HyperGeomResult[[1]]
+  numResults = length(HyperGeomResult)
+  pathwayList = HyperGeomResult[[2]]$pathway
+  result = pathwayList %>% as_tibble()
+  colnames(result) = c("pathway")
+  
+  for (i in 2:numResults){
+    df = HyperGeomResult[[i]]
+    if(dim(df)[2] == 2){
+      colnames(df) = c("pathway", paste0("max_", thresholds[i-1]))
+      result = result %>% left_join(df)
+    }
+  }
+  
+  result.numeric = result %>% select(-pathway) %>% as.data.frame()
+  result$rowMean = rowMeans(result.numeric, na.rm=TRUE)
+  result$rowStd = apply(result.numeric, 1, FUN=function(x){sd(x, na.rm=TRUE)})
+  result$rowMedian = apply(result.numeric, 1, FUN=function(x){median(x, na.rm=TRUE)})
+  result$rowMin = apply(result.numeric, 1, FUN=function(x){min(x, na.rm=TRUE)})
+  result$rowMax = apply(result.numeric, 1, FUN=function(x){max(x, na.rm=TRUE)})
+  result$nSignif = apply(result.numeric, 1, FUN=function(x){sum(x<= 0.05, na.rm=TRUE)})
+  return(result)
+}
+```
+
+```{r execute combined phyper}
+maxIterations = 20000
+
+tongueCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(tongueFuncModel, metabolomicsModel, tongueFeatureMetrics, metabolomicsFeatureMetrics, maxIterations))
+lowlingCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(lowlingFuncModel, metabolomicsModel, lowlingFeatureMetrics, metabolomicsFeatureMetrics, maxIterations))
+lowinterCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(lowinterFuncModel, metabolomicsModel,lowinterFeatureMetrics, metabolomicsFeatureMetrics,  maxIterations))
+uplingCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(uplingFuncModel, metabolomicsModel, uplingFeatureMetrics, metabolomicsFeatureMetrics, maxIterations))
+upinterCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(upinterFuncModel, metabolomicsModel, upinterFeatureMetrics, metabolomicsFeatureMetrics, maxIterations))
+salivaCombResult = postprocessHyperGeomResult(pathwayGeomTest_combined(salivaFuncModel, metabolomicsModel,salivaFeatureMetrics, metabolomicsFeatureMetrics,  maxIterations))
+
+saveRDS(tongueCombResult, "./tongue_pathway_enrichment_result.RDS")
+saveRDS(lowlingCombResult, "./lowling_pathway_enrichment_result.RDS")
+saveRDS(lowinterCombResult, "./lowinter_pathway_enrichment_result.RDS")
+saveRDS(uplingCombResult, "./upling_pathway_enrichment_result.RDS")
+saveRDS(upinterCombResult, "./upinter_pathway_enrichment_result.RDS")
+saveRDS(salivaCombResult, "./saliva_pathway_enrichment_result.RDS")
+```
+
+```{r alternative approach - setRank}
+library(SetRank)
+
+KOdescriptions = read.csv("../4. Functional microbiome pre-processing/Lowinter_functional_analysis_raw_features.csv", sep=" ", header=FALSE)
+colnames(KOdescriptions) = c("geneID", "description")
+metaboliteDescriptions = read.csv("./compound2name.txt", header=FALSE, sep="\t")
+colnames(metaboliteDescriptions) = c("geneID", "description")
+
+KO2pathway_integrated = KO2pathway
+colnames(KO2pathway_integrated) = c("pathway", "geneID")
+KO2pathway_integrated = KO2pathway_integrated %>% mutate(pathway = str_split_fixed(KO2pathway_integrated$pathway, "path:", 2)[,2])
+compound2pathway_integrated = compound2pathway
+colnames(compound2pathway_integrated) = c("pathway", "geneID")
+compound2pathway_integrated = compound2pathway_integrated %>% mutate(pathway = str_split_fixed(compound2pathway_integrated$pathway, "path:", 2)[,2])
+
+reduced_pathway2name = pathway2name[1:299,]
+partA = KO2pathway_integrated %>% left_join(reduced_pathway2name) %>% filter(name != "NA") %>% left_join(KOdescriptions) %>% mutate(termID=pathway,termName=name,dbName="KEGG") %>% select(termID, geneID, termName, dbName, description)
+partB = compound2pathway_integrated %>% left_join(reduced_pathway2name) %>% filter(name != "NA") %>% left_join(metaboliteDescriptions) %>% mutate(termID=pathway,termName=name,dbName="KEGG") %>% select(termID, geneID, termName, dbName, description)
+
+inputForCollection =  rbind(partA, partB) %>% arrange(termID) %>% filter(!termName %in% c("Primary bile acid biosynthesis", "Aminoacyl-tRNA biosynthesis", "Photosynthesis - antenna proteins", "Brassinosteroid biosynthesis", "Zeatin biosynthesis", "Flavonoid biosynthesis", "Isoflavonoid biosynthesis", "Biosynthesis of plant hormones", "Signaling pathways regulating pluripotency of stem cells", "Platelet activation", "Renin-angiotensin system", "Natural killer cell mediated cytotoxicity", "B cell receptor signaling pathway", "Fc gamma R-mediated phagocytosis", "Leukocyte transendothelial migration", "Circadian rhythm", "Circadian rhythm - plant", "Glutamatergic synapse", "Serotonergic synapse", "Dopaminergic synapse", "Olfactory transduction", "Phototransduction", "Insulin signaling pathway", "Progesterone-mediated oocyte maturation", "Thyroid hormone synthesis", "Type II diabetes mellitus", "Type I diabetes mellitus", "Collecting duct acid secretion", "Gastric acid secretion", "Alzheimer's disease", "Amyotrophic lateral sclerosis (ALS)", "Prion diseases", "Salmonella infection", "Legionellosis", "Chagas disease (American trypanosomiasis)", "Malaria", "Amoebiasis", "Tuberculosis", "Hepatitis B", "Influenza A", "Herpes simplex infection", "Pathways in cancer", "Viral carcinogenesis", "Proteoglycans in cancer", "Colorectal cancer", "Pancreatic cancer", "Glioma", "Thyroid cancer", "Melanoma", "Chronic myeloid leukemia", "Small cell lung cancer", "Central carbon metabolism in cancer", "Asthma", "Inflammatory bowel disease (IBD)", "Rheumatoid arthritis", "Graft-versus-host disease", "Hypertrophic cardiomyopathy (HCM)", "Dilated cardiomyopathy", "Biosynthesis of plant secondary metabolites", "Hypnotics", "Antiarrhythmic drugs", "Anti-HIV agents", "Photosynthesis", "Ribosome biogenesis in eukaryotes", "MAPK signaling pathway - yeast", "MAPK signaling pathway - fly", "Cell cycle - yeast", "Meiosis - yeast", "p53 signaling pathway", "Cardiac muscle contraction", "Vascular smooth muscle contraction", "Axon guidance", "Osteoclast differentiation", "Hippo signaling pathway - fly", "Antigen processing and presentation", "Plant-pathogen interaction", "Hematopoietic cell lineage", "T cell receptor signaling pathway", "Intestinal immune network for IgA production", "Circadian rhythm - fly", "Circadian entrainment", "Synaptic vesicle cycle", "Cholinergic synapse", "GABAergic synapse", "Long-term depression", "Phototransduction - fly", "Ovarian steroidogenesis", "Estrogen signaling pathway", "Prolactin signaling pathway", "Regulation of lipolysis in adipocytes", "Non-alcoholic fatty liver disease (NAFLD)", "Maturity onset diabetes of the young", "Pancreatic secretion", "Bile secretion", "Parkinson's disease", "Huntington's disease", "Epithelial cell signaling in Helicobacter pylori infection", "Shigellosis", "Pertussis", "Leishmaniasis", "African trypanosomiasis", "Toxoplasmosis", "Hepatitis C", "Measles", "Epstein-Barr virus infection", "Transcriptional misregulation in cancer", "Chemical carcinogenesis", "MicroRNAs in cancer", "Renal cell carcinoma", "Endometrial cancer", "Prostate cancer", "Basal cell carcinoma", "Bladder cancer", "Acute myeloid leukemia", "Non-small cell lung cancer", "Choline metabolism in cancer", "Autoimmune thyroid disease", "Allograft rejection", "Arrhythmogenic right ventricular cardiomyopathy (ARVC)", "Viral myocarditis", "Biosynthesis of plant hormones", "Anticonvulsants", "Opioid analgesics", "HIV protease inhibitors")) %>% as.data.frame()
+
+inputForCollection %>% as_tibble() %>% select(termID) %>% pull() %>% table() %>% as_tibble() %>% mutate(pathway=unique(inputForCollection$termName)) %>% left_join(pathway2name) %>% arrange(desc(n))
+inputForCollection %>% as_tibble() %>% select(termID) %>% pull() %>% table() %>% as_tibble() %>% ggplot(aes(x=n)) + geom_histogram(bins=100) + geom_vline(xintercept=750, col="red")
+inputForCollection %>% as_tibble() %>% select(termID) %>% pull() %>% table() %>% as_tibble() %>% filter(n<=750) %>% ggplot(aes(x=n)) + geom_histogram()
+```
+
+```{r make or load collection}
+options(mc.cores=8)
+collection = readRDS("./setRankCollection.RDS")
+#collection = buildSetCollection(inputForCollection, maxSetSize=750)
+#saveRDS(collection, "./setRankCollection.RDS")
+```
+
+```{r preparing setRank input}
+metabolomicsVarExp = 0.226
+
+uniteOutput = function(funcModel, funcFeatureMetrics, metabolomicsFeatureMetrics){
+  modelledData = funcModel[[6]]
+  inputData = funcModel[[7]]
+  modelVarExp = sum(modelledData^2, na.rm=TRUE) / sum(inputData^2, na.rm=TRUE)
+  numComponents = ncol(funcModel[[3]]) - 1
+  
+  if(numComponents == 1){
+    partA = funcFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = abs(Congruence_1), geneID = KO) %>% mutate(congruence = congruence / max(congruence)) %>% select(geneID, varExps, congruence) %>% arrange(congruence, varExps)
+  }
+  else{
+    unifiedCongruences = funcFeatureMetrics %>% select(Congruence_1, Congruence_2)
+    unifiedCongruences = abs(unifiedCongruences)
+    unifiedCongruences = apply(unifiedCongruences, 1, function(x){max(x[1], x[2])})
+    partA = funcFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = unifiedCongruences, geneID = KO) %>% mutate(congruence = congruence / max(congruence)) %>% select(geneID, varExps, congruence)
+  }
+  
+  partB = metabolomicsFeatureMetrics %>% mutate(varExps = varExps / max(varExps), congruence = max(abs(Congruence_1), abs(Congruence_2))) %>% mutate(congruence = congruence / max(congruence)) %>% left_join(metabolomics.features) %>% filter(KEGG != "NA") %>% mutate(geneID = KEGG) %>% select(geneID, varExps, congruence)
+  
+  scores = rbind(partA, partB) %>% as_tibble() %>% select(varExps, congruence)
+  scores = apply(scores, 1, mean)
+  result = rbind(partA, partB) %>% mutate(score = scores) %>% arrange(desc(score), desc(congruence), desc(varExps))
+}
+
+uniteOutput_noCongruences = function(funcModel, funcFeatureMetrics, metabolomicsFeatureMetrics){
+  modelledData = funcModel[[6]]
+  inputData = funcModel[[7]]
+  modelVarExp = sum(modelledData^2, na.rm=TRUE) / sum(inputData^2, na.rm=TRUE)
+  numComponents = ncol(funcModel[[3]]) - 1
+  
+  partA = funcFeatureMetrics %>% mutate(varExps = varExps / max(varExps), geneID = KO) %>% select(geneID, varExps) %>% arrange(varExps)
+  partB = metabolomicsFeatureMetrics %>% mutate(varExps = varExps / max(varExps)) %>% left_join(metabolomics.features) %>% filter(KEGG != "NA") %>% mutate(geneID = KEGG) %>% select(geneID, varExps)
+  
+  scores = rbind(partA, partB) %>% as_tibble() %>% select(varExps)
+  scores = apply(scores, 1, mean)
+  result = rbind(partA, partB) %>% mutate(score = scores) %>% arrange(desc(score), desc(varExps))
+}
+
+tongueSetRankInput = uniteOutput(tongueFuncModel, tongueFeatureMetrics, metabolomicsFeatureMetrics)
+lowlingSetRankInput = uniteOutput(lowlingFuncModel, lowlingFeatureMetrics, metabolomicsFeatureMetrics)
+lowinterSetRankInput = uniteOutput(lowinterFuncModel, lowinterFeatureMetrics, metabolomicsFeatureMetrics)
+uplingSetRankInput = uniteOutput(uplingFuncModel, uplingFeatureMetrics, metabolomicsFeatureMetrics)
+upinterSetRankInput = uniteOutput(upinterFuncModel, upinterFeatureMetrics, metabolomicsFeatureMetrics)
+salivaSetRankInput = uniteOutput(salivaFuncModel, salivaFeatureMetrics, metabolomicsFeatureMetrics)
+```
+
+```{r find an arbitrary cutoff for the list to stop}
+a = tongueSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+b = lowlingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+c = lowinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+d = uplingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+e = upinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+f = salivaSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=score)) + geom_line()
+ggarrange(a,b,c,d,e,f)
+
+a = tongueSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+b = lowlingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+c = lowinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+d = uplingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+e = upinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+f = salivaSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=varExps)) + geom_line()
+ggarrange(a,b,c,d,e,f)
+
+a = tongueSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+b = lowlingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+c = lowinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+d = uplingSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+e = upinterSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+f = salivaSetRankInput %>% mutate(index = 1:nrow(.)) %>% mutate(index = index / max(index)) %>% ggplot(aes(x=index,y=congruence)) + geom_line()
+ggarrange(a,b,c,d,e,f)
+```
+
+```{r running setRank}
+rankCutoff = 0.75
+
+tongueNetwork = setRankAnalysis(tongueSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+lowlingNetwork = setRankAnalysis(lowlingSetRankInput$geneID[1:(nrow(lowlingSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+lowinterNetwork = setRankAnalysis(lowinterSetRankInput$geneID[1:(nrow(lowinterSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+uplingNetwork = setRankAnalysis(uplingSetRankInput$geneID[1:(nrow(uplingSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+upinterNetwork = setRankAnalysis(upinterSetRankInput$geneID[1:(nrow(upinterSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+salivaNetwork = setRankAnalysis(salivaSetRankInput$geneID[1:(nrow(salivaSetRankInput)*rankCutoff)], collection, use.ranks=TRUE, setPCutoff=1)
+
+exportSingleResult(tongueNetwork, tongueSetRankInput$geneID, collection, "Tongue_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+exportSingleResult(lowlingNetwork, lowlingSetRankInput$geneID, collection, "Lowling_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+exportSingleResult(lowinterNetwork, lowinterSetRankInput$geneID, collection, "Lowinter_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+exportSingleResult(uplingNetwork, uplingSetRankInput$geneID, collection, "Upling_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+exportSingleResult(upinterNetwork, upinterSetRankInput$geneID, collection, "Upinter_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+exportSingleResult(salivaNetwork, salivaSetRankInput$geneID, collection, "Saliva_SetRank_result", outputPath="./20230704_run_onlyVarExp/")
+```
+
+```{r sanity check}
+mHGT = function(fullGeneSet, geneSets){
+  pathways = inputForCollection %>% as_tibble() %>% select(termID) %>% unique() %>% pull()
+  finalResult = 1:length(pathways)
+  
+  for(i in 1:length(pathways)){
+    pathway = pathways[i]
+    #print(pathway)
+    geneSet = inputForCollection %>% as_tibble() %>% filter(termID == pathway) %>% select(geneID) %>% pull()
+    lambdaVector = as.numeric(fullGeneSet %in% geneSet)
+    
+    hyperGeometricTestResults = 1:length(lambdaVector)
+    for(j in 1:length(lambdaVector)){
+      subset = lambdaVector[1:j]
+      q = sum(subset)
+      m = sum(lambdaVector)
+      n = length(lambdaVector) - m
+      k = j
+      
+      p = phyper(q,m,n,k, lower.tail=FALSE)
+      #print(p)
+      hyperGeometricTestResults[j] = p
+    }
+    finalResult[i] = min(hyperGeometricTestResults)
+  }
+  
+  finalResult = cbind(pathways, finalResult) %>% as_tibble() %>% mutate(finalResult = as.numeric(finalResult))
+  finalResult = finalResult %>% mutate(pathway = pathways, pValue = finalResult) %>% select(-pathways, -finalResult) %>% mutate(Padj = p.adjust(pValue), method="bonferroni")
+  #finalResult$Padj = apply(finalResult, 1, function(x){p.adjust(x[2], method="BH", n=length(lambdaVector))})
+  return(finalResult)
+}
+
+tongue_mHGT_result = mHGT(tongueSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+lowling_mHGT_result = mHGT(lowlingSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+lowinter_mHGT_result = mHGT(lowinterSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+upling_mHGT_result = mHGT(uplingSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+upinter_mHGT_result = mHGT(upinterSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+saliva_mHGT_result = mHGT(salivaSetRankInput$geneID[1:(nrow(tongueSetRankInput)*rankCutoff)], inputForCollection)
+
+pathwaysOfInterest = tongue_mHGT_result %>% filter(Padj < 0.05) %>% select(pathway) %>% pull()
+allResults = list(lowling_mHGT_result, lowinter_mHGT_result, upling_mHGT_result, upinter_mHGT_result, saliva_mHGT_result)
+
+for(i in 1:length(allResults)){
+  result = allResults[[i]]
+  pathwaysOfInterest = c(pathwaysOfInterest, result %>% filter(Padj < 0.05) %>% select(pathway) %>% pull())
+}
+
+pathwaysOfInterest = pathwaysOfInterest %>% table() %>% as_tibble()
+colnames(pathwaysOfInterest) = c("pathway", "n")
+pathwaysOfInterest %>% left_join(pathway2name) %>% arrange(desc(n))
+```
+
+```{r wrangling output for paper}
+importantPathways = c("Starch and sucrose metabolism",
+                      "Histidine metabolism",
+                      "Porphyrin and chlorophyll metabolism",
+                      "Lipopolysaccharide biosynthesis",
+                      "Phosphotransferase system (PTS)",
+                      "Pyruvate metabolism",
+                      "2-Oxocarboxylic acid metabolism",
+                      "Amino sugar and nucleotide sugar metabolism")
+
+salivaCombResult %>% filter(pathway %in% importantPathways) %>% select(pathway, rowMedian, rowMean)
+
+```
+
+```{r Pathway plot in raw data}
+pathway2name2 = pathway2name
+pathway2name2$pathway = str_replace(pathway2name$pathway, "map", "ko")
+
+KOmapping = KO2pathway %>% left_join(pathway2name2)
+ASVmapping = OTU2pathway %>% as_tibble()
+colnames(ASVmapping) = c("asv", "pathway")
+ASVmapping = ASVmapping %>% left_join(pathway2name2)
+BIOCHEMICALmapping = metabolomics.features %>% select(BIOCHEMICAL, KEGG) %>% filter(KEGG != "<NA>")
+colnames(BIOCHEMICALmapping) = c("BIOCHEMICAL", "compound")
+BIOCHEMICALmapping = BIOCHEMICALmapping %>% left_join(compound2pathway) %>% left_join(pathway2name)
+plaquemapping = rf_data %>% select(subject, day, Area_delta_R30, bomppercent)
+colnames(plaquemapping) = c("subject", "days", "Area_delta_R30", "perc_bleeding_sites")
+plaquemapping$days = as.factor(plaquemapping$days)
+
+pathwayPlotOverview = function(funcModel, microbiomeModel, metabolomicsModel, KOmapping, ASVmapping, BIOCHEMICALmapping, pathwayName, overallTitle, path){
+  KOlist = KOmapping %>% filter(name == pathwayName) %>% select(KO) %>% pull
+  ASVlist = ASVmapping %>% filter(name == pathwayName) %>% select(asv) %>% pull
+  BIOCHEMICALlist = BIOCHEMICALmapping %>% filter(name == pathwayName) %>% select(BIOCHEMICAL) %>% pull
+  
+  func_modeled_data = funcModel[[6]]
+  func_input_data = funcModel[[7]]
+  subject_column = rep(funcModel[[1]]$subject, dim(funcModel[[3]])[1])
+  time_column = rep(funcModel[[3]]$days, each=dim(funcModel[[1]])[1])
+  RF_column = rep(funcModel[[1]]$RFgroup, dim(funcModel[[3]])[1])
+  func_input_data$subject = subject_column
+  func_input_data$days = as.factor(time_column)
+  func_input_data$RFgroup = as.factor(RF_column)
+  func_input_data_mapped = func_input_data %>% left_join(plaquemapping)
+  
+  plotKOs = funcModel[[2]] %>% filter(KO %in% KOlist) %>% select(KO) %>% pull
+  coeff = 1:length(plotKOs)
+  pvalues = 1:length(plotKOs)
+  rsq = 1:length(plotKOs)
+  coeff2 = 1:length(plotKOs)
+  pvalues2 = 1:length(plotKOs)
+  rsq2 = 1:length(plotKOs)
+  
+  if(length(plotKOs) > 0){
+    for(i in 1:length(plotKOs)){
+      KO = plotKOs[i]
+      
+      df = func_input_data_mapped %>% select(KO, "Area_delta_R30")
+      df2 = func_input_data_mapped %>% select(KO, "perc_bleeding_sites")
+      equation = paste0("Area_delta_R30", " ~ ", KO)
+      equation2 = paste0("perc_bleeding_sites", " ~", KO)
+      model = lm(as.formula(equation), data=df)
+      model2 = lm(as.formula(equation2), data=df2)
+      
+      coeff[i] = as.numeric(model$coefficients)[2]
+      pvalues[i] = summary(model)$coefficients[2,4]
+      rsq[i] = summary(model)$r.squared
+      coeff2[i] = as.numeric(model2$coefficients)[2]
+      pvalues2[i] = summary(model2)$coefficients[2,4]
+      rsq2[i] = summary(model2)$r.squared
+    }
+    
+    KOinfo = rsq %>% as_tibble() %>% mutate(KO=plotKOs, coeff=coeff,pvalues=pvalues, coeff2=coeff2, pvalues2=pvalues2, rsq2=rsq2) %>% arrange(desc(value))
+    plotKOs = KOinfo %>% select(KO) %>% pull
+    plotKOs = plotKOs[1:9]
+    plotKOs = plotKOs[!is.na(plotKOs)]
+    plotCoeffs = KOinfo %>% select(coeff) %>% pull
+    plotrsq = KOinfo %>% select(value) %>% pull
+    plotps = KOinfo %>% select(pvalues) %>% pull
+    plotCoeffs2 = KOinfo %>% select(coeff2) %>% pull
+    plotrsq2 = KOinfo %>% select(rsq2) %>% pull
+    plotps2 = KOinfo %>% select(pvalues2) %>% pull
+    
+    plotlist = list()
+    plotlist2 = list()
+    plotlist3 = list()
+    
+    for(i in 1:length(plotKOs)){
+      KO = plotKOs[i]
+      plotlist[[i]] = func_input_data %>% ggplot(aes_string(x="days",y=KO,fill="RFgroup")) + geom_boxplot()
+      plotlist2[[i]] = func_input_data_mapped %>% ggplot(aes_string(x=KO,y="Area_delta_R30",colour="RFgroup")) + geom_point() + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq[i],2), ", p=", signif(plotps[i], 2)))
+      plotlist3[[i]] = func_input_data_mapped %>% ggplot(aes_string(x=KO,y="perc_bleeding_sites",colour="RFgroup")) + geom_point() + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq2[i],2), ", p=", signif(plotps2[i], 2)))
+    }
+    plot1 = ggarrange(plotlist=plotlist, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_functionalData_1.jpg"), plot=annotate_figure(plot1, top=paste0(overallTitle, " functional data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot2 = ggarrange(plotlist=plotlist2, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_functionalData_2.jpg"), plot=annotate_figure(plot2, top=paste0(overallTitle, " functional data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot3 = ggarrange(plotlist=plotlist3, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_functionalData_3.jpg"), plot=annotate_figure(plot3, top=paste0(overallTitle, " functional data - ", pathwayName)), width=58, height=36, unit="cm")
+  }
+  
+  asv_modeled_data = microbiomeModel[[6]]
+  asv_input_data = microbiomeModel[[7]]
+  subject_column = rep(microbiomeModel[[1]]$subject, dim(microbiomeModel[[3]])[1])
+  time_column = rep(microbiomeModel[[3]]$days, each=dim(microbiomeModel[[1]])[1])
+  RF_column = rep(microbiomeModel[[1]]$RFgroup, dim(microbiomeModel[[3]])[1])
+  asv_input_data$subject = subject_column
+  asv_input_data$days = as.factor(time_column)
+  asv_input_data$RFgroup = as.factor(RF_column)
+  asv_input_data_mapped = asv_input_data %>% left_join(plaquemapping)
+  
+  plotASVs = microbiomeModel[[2]] %>% filter(asv %in% ASVlist) %>% select(asv) %>% pull
+  coeff = 1:length(plotASVs)
+  pvalues = 1:length(plotASVs)
+  rsq = 1:length(plotASVs)
+  coeff2 = 1:length(plotASVs)
+  pvalues2 = 1:length(plotASVs)
+  rsq2 = 1:length(plotASVs)
+  
+  if(length(plotASVs > 0)){
+    for(i in 1:length(plotASVs)){
+      KO = plotASVs[i]
+      
+      df = asv_input_data_mapped %>% select(KO, "Area_delta_R30")
+      df2 = asv_input_data_mapped %>% select(KO, "perc_bleeding_sites")
+      equation = paste0("Area_delta_R30", " ~ ", KO)
+      equation2 = paste0("perc_bleeding_sites", " ~ ", KO)
+      model = lm(as.formula(equation), data=df)
+      model2 = lm(as.formula(equation2), data=df2)
+      
+      coeff[i] = as.numeric(model$coefficients)[2]
+      pvalues[i] = summary(model)$coefficients[2,4]
+      rsq[i] = summary(model)$r.squared
+      
+      coeff2[i] = as.numeric(model2$coefficients)[2]
+      pvalues2[i] = summary(model2)$coefficients[2,4]
+      rsq2[i] = summary(model2)$r.squared
+    }
+    ASVinfo = rsq %>% as_tibble() %>% mutate(asv=plotASVs, coeff=coeff,pvalues=pvalues, coeff2=coeff2, pvalues2=pvalues2, rsq2=rsq2) %>% arrange(desc(value))
+    
+    plotASVs = ASVinfo %>% select(asv) %>% pull
+    plotASVs = plotASVs[1:9]
+    plotASVs = plotASVs[!is.na(plotASVs)]
+    plotCoeffs = ASVinfo %>% select(coeff) %>% pull
+    plotrsq = ASVinfo %>% select(value) %>% pull
+    plotps = ASVinfo %>% select(pvalues) %>% pull
+    plotCoeffs2 = ASVinfo %>% select(coeff2) %>% pull
+    plotrsq2 = ASVinfo %>% select(rsq2) %>% pull
+    plotps2 = ASVinfo %>% select(pvalues2) %>% pull
+    
+    ASVnames = plotASVs %>% as_tibble()
+    colnames(ASVnames) = c("asv")
+    ASVnames = ASVnames %>% left_join(taxa)
+    ASVnames = paste(ASVnames$Genus, ASVnames$Species)
+    
+    plotlist4 = list()
+    plotlist5 = list()
+    plotlist6 = list()
+    
+    for(i in 1:length(plotASVs)){
+      ASV = plotASVs[i]
+      plotlist4[[i]] = asv_input_data %>% ggplot(aes_string(x="days",y=ASV,fill="RFgroup")) + geom_boxplot() + ylab(ASVnames[i])
+      plotlist5[[i]] = asv_input_data_mapped %>% ggplot(aes_string(x=ASV,y="Area_delta_R30",colour="RFgroup")) + geom_point() + xlab(ASVnames[i]) + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq[i],2), ", p=", signif(plotps[i], 2)))
+      plotlist6[[i]] = asv_input_data_mapped %>% ggplot(aes_string(x=ASV,y="perc_bleeding_sites",color="RFgroup")) + geom_point() + xlab(ASVnames[i]) + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq2[i],2), ", p=", signif(plotps2[i], 2)))
+    }
+    plot4 = ggarrange(plotlist=plotlist4, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_microbiomeData_1.jpg"), plot=annotate_figure(plot4, top=paste0(overallTitle, " preprocessed microbiome data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot5 = ggarrange(plotlist=plotlist5, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_microbiomeData_2.jpg"), plot=annotate_figure(plot5, top=paste0(overallTitle, " preprocessed microbiome data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot6 = ggarrange(plotlist=plotlist6, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_microbiomeData_3.jpg"), plot=annotate_figure(plot6, top=paste0(overallTitle, " preprocessed microbiome data - ", pathwayName)), width=58, height=36, unit="cm")
+  }
+  
+  metabolomics_modeled_data = metabolomicsModel[[6]]
+  metabolomics_input_data = metabolomicsModel[[7]]
+  subject_column = rep(metabolomicsModel[[1]]$subject, dim(metabolomicsModel[[3]])[1])
+  time_column = rep(metabolomicsModel[[3]]$days, each=dim(metabolomicsModel[[1]])[1])
+  RF_column = rep(metabolomicsModel[[1]]$RFgroup, dim(metabolomicsModel[[3]])[1])
+  metabolomics_input_data$subject = subject_column
+  metabolomics_input_data$days = as.factor(time_column)
+  metabolomics_input_data$RFgroup = as.factor(RF_column)
+  metabolomics_input_data_mapped = metabolomics_input_data %>% left_join(plaquemapping)
+  
+  plotMetab = metabolomicsModel[[2]] %>% filter(BIOCHEMICAL %in% BIOCHEMICALlist) %>% select(BIOCHEMICAL) %>% pull
+  coeff = 1:length(plotMetab)
+  pvalues = 1:length(plotMetab)
+  rsq = 1:length(plotMetab)
+  coeff2 = 1:length(plotMetab)
+  pvalues2 = 1:length(plotMetab)
+  rsq2 = 1:length(plotMetab)
+  
+  if(length(plotMetab) > 0){
+    for(i in 1:length(plotMetab)){
+      KO = plotMetab[i]
+      
+      df = metabolomics_input_data_mapped %>% select(KO, "Area_delta_R30")
+      df2 = metabolomics_input_data_mapped %>% select(KO, "perc_bleeding_sites")
+      colnames(df) = make.names(colnames(df))
+      colnames(df2) = make.names(colnames(df2))
+      KO = make.names(KO)
+      equation = paste0("Area_delta_R30", " ~ ", as.name(KO))
+      equation2 = paste0("perc_bleeding_sites", " ~ ", as.name(KO))
+      model = lm(as.formula(equation), data=df)
+      model2 = lm(as.formula(equation2), data=df2)
+      
+      coeff[i] = as.numeric(model$coefficients)[2]
+      pvalues[i] = summary(model)$coefficients[2,4]
+      rsq[i] = summary(model)$r.squared
+      coeff2[i] = as.numeric(model2$coefficients)[2]
+      pvalues2[i] = summary(model2)$coefficients[2,4]
+      rsq2[i] = summary(model2)$r.squared
+    }
+    MetabInfo = rsq %>% as_tibble() %>% mutate(BIOCHEMICAL=plotMetab, coeff=coeff,pvalues=pvalues, coeff2=coeff2, pvalues2=pvalues2, rsq2=rsq2) %>% arrange(desc(value))
+    
+    plotMetab = MetabInfo %>% select(BIOCHEMICAL) %>% pull
+    plotMetab = plotMetab[1:9]
+    plotMetab = plotMetab[!is.na(plotMetab)]
+    plotCoeffs = MetabInfo %>% select(coeff) %>% pull
+    plotrsq = MetabInfo %>% select(value) %>% pull
+    plotps = MetabInfo %>% select(pvalues) %>% pull
+    plotCoeffs2 = MetabInfo %>% select(coeff2) %>% pull
+    plotrsq2 = MetabInfo %>% select(rsq2) %>% pull
+    plotps2 = MetabInfo %>% select(pvalues2) %>% pull
+    
+    plotlist7 = list()
+    plotlist8 = list()
+    plotlist9 = list()
+    
+    for(i in 1:length(plotMetab)){
+      BIOCHEMICAL = plotMetab[i]
+      plotlist7[[i]] = metabolomics_input_data %>% ggplot(aes_string(x="days",y=as.name(BIOCHEMICAL),fill="RFgroup")) + geom_boxplot()
+      plotlist8[[i]] = metabolomics_input_data_mapped %>% ggplot(aes_string(x=as.name(BIOCHEMICAL), y="Area_delta_R30",colour="RFgroup")) + geom_point() + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq[i],2), ", p=", signif(plotps[i], 2)))
+      plotlist9[[i]] = metabolomics_input_data_mapped %>% ggplot(aes_string(x=as.name(BIOCHEMICAL), y="perc_bleeding_sites",colour="RFgroup")) + geom_point() + geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE, color="red", size=1) + ggtitle(paste0("Rsq=", signif(plotrsq2[i],2), ", p=", signif(plotps2[i], 2)))
+    }
+    plot7 = ggarrange(plotlist=plotlist7, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_metabolomicsData_1.jpg"), plot=annotate_figure(plot7, top=paste0(overallTitle, " preprocessed metabolomics data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot8 = ggarrange(plotlist=plotlist8, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_metabolomicsData_2.jpg"), plot=annotate_figure(plot8, top=paste0(overallTitle, " preprocessed metabolomics data - ", pathwayName)), width=58, height=36, unit="cm")
+    plot9 = ggarrange(plotlist=plotlist9, common.legend=TRUE)
+    ggsave(paste0(path,pathwayName,"_metabolomicsData_3.jpg"), plot=annotate_figure(plot9, top=paste0(overallTitle, " preprocessed metabolomics data - ", pathwayName)), width=58, height=36, unit="cm")
+  }
+}
+
+plotPOverview = function(result, pathwayName, overallTitle){
+  plotData = result %>% filter(pathway == pathwayName) %>% select(-rowMean, -rowStd, -rowMedian, -rowMin, -rowMax, -nSignif) %>% pivot_longer(-pathway)
+  temp = plotData$name %>% str_split_fixed("_", 2)
+  plotData$threshold = as.numeric(temp[,2])
+  
+  plotData %>% ggplot(aes(x=threshold,y=value)) + geom_line() + xlab("Max mapping pathway threshold") + ylab("P-value") + ggtitle(overallTitle)
+}
+
+plotPvalues = function(result, overallTitle){
+  plotData = result %>% select(-rowMean, -rowStd, -rowMin, -rowMax, -rowMedian, -nSignif) %>% pivot_longer(-pathway)
+  temp = plotData$name %>% str_split_fixed("_", 2)
+  plotData$threshold = as.numeric(temp[,2])
+  thresholds = c(min(plotData$threshold), 
+                 unique(plotData$threshold)[round(length(unique(plotData$threshold))/4)],
+                 unique(plotData$threshold)[round(length(unique(plotData$threshold))/2)],
+                 unique(plotData$threshold)[round(length(unique(plotData$threshold))/4)*3],
+                 max(plotData$threshold))
+  plotData = plotData %>% filter(threshold %in% thresholds)
+  
+  plot = plotData %>% ggplot(aes(x=value,fill=as.factor(threshold))) + geom_histogram() + ggtitle(overallTitle)
+  return(plot)
+}
+```
+
+```{r make pvalue overview plots}
+a = plotPvalues(tongueFuncResult, "Tongue")
+b = plotPvalues(lowlingFuncResult, "Low ling")
+c = plotPvalues(lowinterFuncResult, "Low inter")
+d = plotPvalues(uplingFuncResult, "Up ling")
+e = plotPvalues(upinterFuncResult, "Up inter")
+plot1 = ggarrange(a,b,c,d,e)
+annotate_figure(plot1, top="Functional data")
+
+f = plotPvalues(tongueResult, "Tongue")
+g = plotPvalues(lowlingResult, "Low ling")
+h = plotPvalues(lowinterResult, "Low inter")
+i = plotPvalues(uplingResult, "Up ling")
+j = plotPvalues(upinterResult, "Up inter")
+k = plotPvalues(metabolomicsResult, "Metabolomics")
+plot2 = ggarrange(f,g,h,i,j,k)
+annotate_figure(plot2, top="Ordinary data")
+```
+
+```{r phyper permutation test}
+pathwayGeomTest_permute = function(model, trueResult, pathwayName, numPermutations){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+  KOmappings = KO2pathway %>% select(KO) %>% table() %>% as_tibble()
+  maxMappings = KOmappings %>% arrange(desc(n)) %>% select(n) %>% pull %>% unique
+  overallResult = list()
+  overallResult[[1]] = maxMappings
+  
+  var_exp_data_all = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(KO = colnames(input_data)) %>% left_join(KO2pathway) %>% left_join(pathway2name) %>% filter(name != "NA")
+  
+
+  result = matrix(0, nrow=numPermutations, ncol=length(maxMappings))
+  for (i in 1:length(maxMappings)){
+    excludeKOs = KOmappings %>% filter(n > maxMappings[i]) %>% select(".") %>% pull
+    
+    var_exp_data = var_exp_data_all %>% filter(!(KO %in% excludeKOs))
+    numSuccesses = round(0.1 * length(var_exp_data$KO %>% unique))
+      
+    for (j in 1:numPermutations){
+      var_exp_data = var_exp_data[sample(nrow(var_exp_data)),] # permute result
+      KOsuccess = var_exp_data %>% select(value, KO) %>% unique()
+      KOsuccess = KOsuccess[1:numSuccesses,] %>% as_tibble() %>% select(KO) %>% pull()
+        
+      totalN = length(var_exp_data$KO %>% unique)
+      m = numSuccesses
+      n = totalN - m
+        
+      df = var_exp_data %>% filter(name == pathwayName)
+      success = df %>% filter(KO %in% KOsuccess)
+      k = dim(df)[1]
+      q = dim(success)[1]
+      p = phyper(q, m, n, k)
+      result[j,i] = p
+    }
+  }
+  
+  means = rowMeans(result)
+  medians = apply(result, 2, median)
+  stds = apply(result, 2, sd)
+  
+  trueMean = trueResult %>% filter(pathway == pathwayName) %>% select(rowMean) %>% pull
+  trueMedian = trueResult %>% filter(pathway == pathwayName) %>% select(rowMedian) %>% pull
+  trueStd = trueResult %>% filter(pathway == pathwayName) %>% select(rowStd) %>% pull
+  
+  a = means %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueMean ,y=0, colour="red") + ylab("Count") + ggtitle("Means")
+  b = medians %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueMedian, y=0, colour="red") + ylab("Count") +  ggtitle("Medians")
+  c = stds %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueStd, y=0, colour="red") + ylab("Count") + ggtitle("Stds")
+  plot = ggarrange(a,b,c, nrow=1, ncol=3)
+  print(annotate_figure(plot, top=pathwayName))
+}
+```
+
+```{r do permutation phyper tests}
+nPermutations = 50
+
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "Two-component system", nPermutations)
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "ABC transporters", nPermutations)
+pathwayGeomTest_permute(tongueFuncModel, tongueFuncResult, "Phosphotransferase system (PTS)", nPermutations)
+
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "Two-component system", nPermutations)
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "ABC transporters", nPermutations)
+pathwayGeomTest_permute(lowlingFuncModel, lowlingFuncResult, "Phosphotransferase system (PTS)", nPermutations)
+
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Two-component system", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "ABC transporters", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Phosphotransferase system (PTS)", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Microbial metabolism in diverse environments", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Pyruvate metabolism", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Arginine and proline metabolism", nPermutations)
+pathwayGeomTest_permute(lowinterFuncModel, lowinterFuncResult, "Oxidative phosphorylation", nPermutations)
+
+pathwayGeomTest_permute(uplingFuncModel, uplingFuncResult, "Two-component system", nPermutations)
+pathwayGeomTest_permute(uplingFuncModel, uplingFuncResult, "Lipopolysaccharide biosynthesis", nPermutations)
+
+pathwayGeomTest_permute(upinterFuncModel, upinterFuncResult, "Two-component system", nPermutations)
+pathwayGeomTest_permute(upinterFuncModel, upinterFuncResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_permute(upinterFuncModel, upinterFuncResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_permute(upinterFuncModel, upinterFuncResult, "ABC transporters", nPermutations)
+```
+
+```{r do permutation phyper tests - combined with metabolomics function}
+pathwayGeomTest_combined_permuted = function(funcModel, metabolomicsModel, trueResult, pathwayName, numPermutations){
+  func_modeled_data = funcModel[[6]]
+  func_input_data = funcModel[[7]]
+  totalVarExp_func = sum(func_modeled_data^2) / sum(func_input_data^2)
+  KOmappings_func = KO2pathway %>% select(KO) %>% table() %>% as_tibble()
+  maxMappings_func = KOmappings_func %>% arrange(desc(n)) %>% select(n) %>% pull %>% unique
+
+  var_exp_data_all_func = (apply(func_modeled_data^2, 2, sum) / apply(func_input_data^2, 2, sum)) %>% as_tibble() %>% mutate(KO = colnames(func_input_data)) %>% left_join(KO2pathway) %>% left_join(pathway2name) %>% filter(name != "NA")
+  
+  metab_modeled_data = metabolomicsModel[[6]]
+  metab_input_data = metabolomicsModel[[7]]
+  totalVarExp_metab = sum(metab_modeled_data^2) / sum(metab_input_data^2)
+  KOmappings_metab = compound2pathway %>% select(compound) %>% table() %>% as_tibble()
+  maxMappings_metab = KOmappings_metab %>% arrange(desc(n)) %>% select(n) %>% pull %>% unique
+  
+  var_exp_data_all_metab = (apply(metab_modeled_data^2, 2, sum) / apply(metab_input_data^2, 2, sum)) %>% as_tibble() %>% mutate(BIOCHEMICAL = colnames(metab_input_data)) %>% left_join(metabolomics.features) %>% select(value, BIOCHEMICAL, KEGG) %>% filter(KEGG != "NA")
+  colnames(var_exp_data_all_metab) = c("value", "BIOCHEMICAL", "compound")
+  var_exp_data_all_metab = var_exp_data_all_metab %>% left_join(compound2pathway) %>% left_join(pathway2name) %>% filter(name != "NA")
+  
+  maxMappings = c(maxMappings_func, maxMappings_metab) %>% as_tibble() %>% arrange(desc(value)) %>% unique() %>% pull
+  
+  overallResult = list()
+  overallResult[[1]] = maxMappings
+  
+  result = matrix(0, nrow=numPermutations, ncol=length(maxMappings))
+  for (i in 1:length(maxMappings)){
+    excludeKOs_func = KOmappings_func %>% filter(n > maxMappings[i]) %>% select(".") %>% pull
+    var_exp_data_func = var_exp_data_all_func %>% filter(!(KO %in% excludeKOs_func))
+    numSuccesses_func = round(0.1 * length(var_exp_data_func$KO %>% unique))
+    
+    excludeKOs_metab = KOmappings_metab %>% filter(n > maxMappings[i]) %>% select(".") %>% pull
+    var_exp_data_metab = var_exp_data_all_metab %>% filter(!(compound %in% excludeKOs_metab))
+    numSuccesses_metab = round(0.1 * length(var_exp_data_metab$compound %>% unique))
+    
+    
+    for (j in 1:numPermutations){
+      var_exp_data_func = var_exp_data_func[sample(nrow(var_exp_data_func)),] # permute result
+      KOsuccess_func = var_exp_data_func %>% select(value, KO) %>% unique()
+      KOsuccess_func = KOsuccess_func[1:numSuccesses_func,] %>% as_tibble() %>% select(KO) %>% pull()
+      
+      var_exp_data_metab = var_exp_data_metab[sample(nrow(var_exp_data_metab)),] # permute result
+      KOsuccess_metab = var_exp_data_metab  %>% select(value, compound) %>% unique()
+      KOsuccess_metab = KOsuccess_metab[1:numSuccesses_metab,] %>% as_tibble() %>% select(compound) %>% pull()
+    
+      totalN = length(var_exp_data_func$KO %>% unique) + length(var_exp_data_metab$compound %>% unique)
+      m = numSuccesses_func + numSuccesses_metab
+      n = totalN - m
+      
+      df_func = var_exp_data_func %>% filter(name == pathwayName)
+      df_metab = var_exp_data_metab %>% filter(name == pathwayName)
+      success_func = df_func %>% filter(KO %in% KOsuccess_func)
+      success_metab = df_metab %>% filter(compound %in% KOsuccess_metab)
+      
+      k = dim(df_func)[1] + dim(df_metab)[1]
+      q = dim(success_func)[1] + dim(success_metab)[1]
+      p = phyper(q, m, n, k)
+      result[j,i] = p
+    }
+  }
+  
+  means = rowMeans(result)
+  medians = apply(result, 2, median)
+  stds = apply(result, 2, sd)
+  
+  trueMean = trueResult %>% filter(pathway == pathwayName) %>% select(rowMean) %>% pull
+  trueMedian = trueResult %>% filter(pathway == pathwayName) %>% select(rowMedian) %>% pull
+  trueStd = trueResult %>% filter(pathway == pathwayName) %>% select(rowStd) %>% pull
+  
+  a = means %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueMean ,y=0, colour="red") + ylab("Count") + ggtitle("Means")
+  b = medians %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueMedian, y=0, colour="red") + ylab("Count") +  ggtitle("Medians")
+  c = stds %>% as_tibble() %>% ggplot(aes(x=value)) + geom_histogram() + annotate("point", x=trueStd, y=0, colour="red") + ylab("Count") + ggtitle("Stds")
+  plot = ggarrange(a,b,c, nrow=1, ncol=3)
+  print(annotate_figure(plot, top=pathwayName))
+}
+```
+
+```{r do combined permutation test}
+nPermutations = 50
+
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Histidine metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Two-component system", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "ABC transporters", nPermutations)
+pathwayGeomTest_combined_permuted(tongueFuncModel, metabolomicsModel, tongueCombResult, "Phosphotransferase system (PTS)", nPermutations)
+
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Histidine metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Two-component system", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "ABC transporters", nPermutations)
+pathwayGeomTest_combined_permuted(lowlingFuncModel, metabolomicsModel, lowlingCombResult, "Phosphotransferase system (PTS)", nPermutations)
+
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "Histidine metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "Two-component system", nPermutations)
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "Phosphotransferase system (PTS)", nPermutations)
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "Pyruvate metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(lowinterFuncModel, metabolomicsModel, lowinterCombResult, "2-Oxocarboxylic acid metabolism", nPermutations)
+
+pathwayGeomTest_combined_permuted(uplingFuncModel, metabolomicsModel, uplingCombResult, "Two-component system", nPermutations)
+pathwayGeomTest_combined_permuted(uplingFuncModel, metabolomicsModel, uplingCombResult, "Lipopolysaccharide biosynthesis", nPermutations)
+
+pathwayGeomTest_combined_permuted(upinterFuncModel, metabolomicsModel, upinterCombResult, "Two-component system", nPermutations)
+pathwayGeomTest_combined_permuted(upinterFuncModel, metabolomicsModel, upinterCombResult, "Porphyrin and chlorophyll metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(upinterFuncModel, metabolomicsModel, upinterCombResult, "Lipopolysaccharide biosynthesis", nPermutations)
+pathwayGeomTest_combined_permuted(upinterFuncModel, metabolomicsModel, upinterCombResult, "ABC transporters", nPermutations)
+pathwayGeomTest_combined_permuted(upinterFuncModel, metabolomicsModel, upinterCombResult, "Phosphotransferase system (PTS)", nPermutations)
+
+pathwayGeomTest_combined_permuted(salivaFuncModel, metabolomicsModel, salivaCombResult, "Starch and sucrose metabolism", nPermutations)
+pathwayGeomTest_combined_permuted(salivaFuncModel, metabolomicsModel, salivaCombResult, "Phosphotransferase system (PTS)", nPermutations)
+pathwayGeomTest_combined_permuted(salivaFuncModel, metabolomicsModel, salivaCombResult, "Amino sugar and nucleotide sugar metabolism", nPermutations)
+```
+
+```{r Check feature variance explained against pathway}
+importantPathways = c("Two-component system",
+                      "Arginine and proline metabolism",
+                      "ABC transporters",
+                      "Phosphotransferase system (PTS)",
+                      "Starch and sucrose metabolism",
+                      "Porphyrin and chlorophyll metabolism",
+                      "Lipopolysaccharide biosynthesis",
+                      "Microbial metabolism in diverse environments",
+                      "Pyruvate metabolism",
+                      "Oxidative phosphorylation")
+
+makePathviewImage = function(funcModel, metabolomicsModel, pathwayName, filename, path){
+  pathwayKO = pathway2name2 %>% filter(name == pathwayName) %>% select(pathway) %>% pull %>% strsplit("path:ko")
+  pathwayKO = pathwayKO[[1]][2]
+  
+  func_modeled_data = funcModel[[6]]
+  func_input_data = funcModel[[7]]
+  func_result = (apply(func_modeled_data^2, 2, sum) / apply(func_input_data^2, 2, sum)) %>% as_tibble() %>% mutate(KO=funcModel[[2]]$KO)
+  func_totalVarExp = sum(func_modeled_data^2) / sum(func_input_data^2)
+
+  functional_pathview_data = func_result %>% select(value) %>% pull
+  functional_pathview_data = functional_pathview_data - func_totalVarExp
+
+  #rescale_to_min1_max1 <- function(x){   (x - min(x))/(max(x)-min(x)) * (newMax - newMin) + newMin}
+  rescale_to_min1_max1 <- function(x){   (x - min(x))/(max(x)-min(x)) * (1 - -1) + -1}
+  functional_pathview_data = rescale_to_min1_max1(functional_pathview_data) # rescale to [-1,1]
+  names(functional_pathview_data) = func_result %>% select(KO) %>% pull
+
+  modeled_data = metabolomicsModel[[6]]
+  input_data = metabolomicsModel[[7]]
+  result = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(BIOCHEMICAL=metabolomicsModel[[2]]$BIOCHEMICAL) %>% left_join(metabolomics.features %>% select(BIOCHEMICAL, KEGG)) %>% filter(KEGG != "NA")
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+
+  compound_pathview = result %>% select(value) %>% pull
+  compound_pathview = compound_pathview - totalVarExp
+  compound_pathview = rescale_to_min1_max1(compound_pathview) # rescale to [-1,1]
+  names(compound_pathview) = result %>% select(KEGG) %>% pull
+
+  pathview(gene.data=functional_pathview_data, cpd.data=compound_pathview, pathway.id=pathwayKO, species="ko", out.suffix=filename, kegg.dir=path, kegg.native=T, low=list(gene="red",cpd="red"), mid=list(gene="gray",cpd="gray"), high=list(gene="green",cpd="green"))
+}
+
+makePathviewImage_time = function(funcModel, metabolomicsModel, pathwayName, filename, path){
+  pathwayKO = pathway2name2 %>% filter(name == pathwayName) %>% select(pathway) %>% pull %>% strsplit("path:ko")
+  pathwayKO = pathwayKO[[1]][2]
+  
+  func_modeled_data = funcModel[[4]]
+  func_input_data = funcModel[[5]]
+  func_result = (apply(func_modeled_data^2, 2, sum) / apply(func_input_data^2, 2, sum)) %>% as_tibble() %>% mutate(KO=colnames(funcModel[[4]]))
+  temp = func_result$KO %>% str_split_fixed(., "_t",2)
+  func_result$KO = temp[,1]
+  func_result$visit = as.numeric(temp[,2])
+  func_totalVarExp = sum(func_modeled_data^2) / sum(func_input_data^2)
+
+  functional_pathview_data = func_result %>% select(value) %>% pull
+  functional_pathview_data = functional_pathview_data - func_totalVarExp
+  rescale_to_min1_max1 <- function(x){   (x - min(x))/(max(x)-min(x)) * (1 - -1) + -1}
+  functional_pathview_data = rescale_to_min1_max1(functional_pathview_data) # rescale to [-1,1]
+
+  modeled_data = metabolomicsModel[[4]]
+  input_data = metabolomicsModel[[5]]
+  result = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(BIOCHEMICAL=colnames(metabolomicsModel[[4]]))
+  temp = result$BIOCHEMICAL %>% str_split_fixed(., "_t",2)
+  result$BIOCHEMICAL = temp[,1]
+  result$visit = as.numeric(temp[,2])
+  result$visit = result$visit + 1
+  result = result %>% left_join(metabolomics.features) %>% select(value, KEGG, visit) %>% filter(KEGG != "NA")
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+
+  compound_pathview = result %>% select(value) %>% pull
+  compound_pathview = compound_pathview - totalVarExp
+  compound_pathview = rescale_to_min1_max1(compound_pathview) # rescale to [-1,1]
+  
+  for(i in 1:7)
+  {
+    f_data = functional_pathview_data[func_result$visit == i]
+    names(f_data) = func_result %>% filter(visit == i) %>% select(KO) %>% pull
+    
+    if(i == 1 | i == 7)
+    {
+      pathview(gene.data=f_data,
+               pathway.id=pathwayKO,
+               species="ko",
+               out.suffix=paste0(filename,"_t",i),
+               kegg.dir=path,
+               kegg.native=T,
+               low=list(gene="red",cpd="red"),
+               mid=list(gene="gray",cpd="gray"),
+               high=list(gene="green",cpd="green"))
+    }
+    else
+    {
+      c_data = compound_pathview[result$visit == i]
+      names(c_data) = result %>% filter(visit == i) %>% select(KEGG) %>% pull
+      
+      pathview(gene.data=f_data,
+               cpd.data=c_data,
+               pathway.id=pathwayKO,
+               species="ko",
+               out.suffix=paste0(filename,"_t",i),
+               kegg.dir=path,
+               kegg.native=T,
+               low=list(gene="red",cpd="red"),
+               mid=list(gene="gray",cpd="gray"),
+               high=list(gene="green",cpd="green"))
+    }
+  }
+}
+```
+
+```{r Make pathway images}
+makePathviewImage(tongueFuncModel, metabolomicsModel, importantPathways[1], paste0("Tongue_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage(tongueFuncModel, metabolomicsModel, importantPathways[3], paste0("Tongue_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage(tongueFuncModel, metabolomicsModel, importantPathways[4], paste0("Tongue_", importantPathways[4]), "./Figures/Pathway analysis/")
+
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[1], paste0("Lowling_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[3], paste0("Lowling_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[4], paste0("Lowling_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[5], paste0("Lowling_", importantPathways[5]), "./Figures/Pathway analysis/")
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[6], paste0("Lowling_", importantPathways[6]), "./Figures/Pathway analysis/")
+makePathviewImage(lowlingFuncModel, metabolomicsModel, importantPathways[7], paste0("Lowling_", importantPathways[7]), "./Figures/Pathway analysis/")
+
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[1], paste0("Lowinter_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[2], paste0("Lowinter_", importantPathways[2]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[3], paste0("Lowinter_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[4], paste0("Lowinter_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[8], paste0("Lowinter_", importantPathways[8]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[9], paste0("Lowinter_", importantPathways[9]), "./Figures/Pathway analysis/")
+makePathviewImage(lowinterFuncModel, metabolomicsModel, importantPathways[10], paste0("Lowinter_", importantPathways[10]), "./Figures/Pathway analysis/")
+
+makePathviewImage(uplingFuncModel, metabolomicsModel, importantPathways[1], paste0("Upling_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage(uplingFuncModel, metabolomicsModel, importantPathways[7], paste0("Upling_", importantPathways[7]), "./Figures/Pathway analysis/")
+
+makePathviewImage(upinterFuncModel, metabolomicsModel, importantPathways[1], paste0("Upinter_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage(upinterFuncModel, metabolomicsModel, importantPathways[4], paste0("Upinter_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage(upinterFuncModel, metabolomicsModel, importantPathways[10], paste0("Upinter_", importantPathways[10]), "./Figures/Pathway analysis/")
+
+```
+
+```{r Make pathway images over time}
+makePathviewImage_time(tongueFuncModel, metabolomicsModel, importantPathways[1], paste0("Tongue_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage_time(tongueFuncModel, metabolomicsModel, importantPathways[3], paste0("Tongue_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage_time(tongueFuncModel, metabolomicsModel, importantPathways[4], paste0("Tongue_", importantPathways[4]), "./Figures/Pathway analysis/")
+
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[1], paste0("Lowling_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[3], paste0("Lowling_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[4], paste0("Lowling_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[5], paste0("Lowling_", importantPathways[5]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[6], paste0("Lowling_", importantPathways[6]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowlingFuncModel, metabolomicsModel, importantPathways[7], paste0("Lowling_", importantPathways[7]), "./Figures/Pathway analysis/")
+
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[1], paste0("Lowinter_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[2], paste0("Lowinter_", importantPathways[2]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[3], paste0("Lowinter_", importantPathways[3]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[4], paste0("Lowinter_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[8], paste0("Lowinter_", importantPathways[8]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[9], paste0("Lowinter_", importantPathways[9]), "./Figures/Pathway analysis/")
+makePathviewImage_time(lowinterFuncModel, metabolomicsModel, importantPathways[10], paste0("Lowinter_", importantPathways[10]), "./Figures/Pathway analysis/")
+
+makePathviewImage_time(uplingFuncModel, metabolomicsModel, importantPathways[1], paste0("Upling_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage_time(uplingFuncModel, metabolomicsModel, importantPathways[7], paste0("Upling_", importantPathways[7]), "./Figures/Pathway analysis/")
+
+makePathviewImage_time(upinterFuncModel, metabolomicsModel, importantPathways[1], paste0("Upinter_", importantPathways[1]), "./Figures/Pathway analysis/")
+makePathviewImage_time(upinterFuncModel, metabolomicsModel, importantPathways[4], paste0("Upinter_", importantPathways[4]), "./Figures/Pathway analysis/")
+makePathviewImage_time(upinterFuncModel, metabolomicsModel, importantPathways[10], paste0("Upinter_", importantPathways[10]), "./Figures/Pathway analysis/")
+```
+
+```{r Data prep}
+quickConvert = function(model){
+  input_data = model[[7]]
+  subject_column = rep(model[[1]]$subject, dim(model[[3]])[1])
+  time_column = rep(model[[3]]$days, each=dim(model[[1]])[1])
+  RF_column = rep(model[[1]]$RFgroup, dim(model[[3]])[1])
+  input_data$subject = subject_column
+  input_data$days = as.factor(time_column)
+  input_data$RFgroup = as.factor(RF_column)
+  return(input_data)
+}
+
+plaquemapping = rf_data %>% select(subject, day, Area_delta_R30, bomppercent)
+colnames(plaquemapping) = c("subject", "days", "Area_delta_R30", "perc_bleeding_sites")
+plaquemapping$days = as.factor(plaquemapping$days)
+
+tongueFuncInput = quickConvert(tongueFuncModel)
+lowlingFuncInput = quickConvert(lowlingFuncModel)
+lowinterFuncInput = quickConvert(lowinterFuncModel)
+uplingFuncInput = quickConvert(uplingFuncModel)
+upinterFuncInput = quickConvert(upinterFuncModel)
+tongueInput = quickConvert(tongueModel)
+lowlingInput = quickConvert(lowlingModel)
+lowinterInput = quickConvert(lowinterModel)
+uplingInput = quickConvert(uplingModel)
+upinterInput = quickConvert(upinterModel)
+metabolomicsInput = quickConvert(metabolomicsModel)
+```
+
+```{r Quick inspect functions}
+quickInspect = function(featureName, tongueData, lowlingData, lowinterdata, uplingData, upinterData, path){
+
+  tonguePresence = (featureName %in% colnames(tongueData))
+  lowlingPresence = (featureName %in% colnames(lowlingData))
+  lowinterPresence = (featureName %in% colnames(lowinterdata))
+  uplingPresence = (featureName %in% colnames(uplingData))
+  upinterPresence = (featureName %in% colnames(upinterData))
+  
+  if(sum(c(tonguePresence, lowlingPresence, lowinterPresence, uplingPresence, upinterPresence)) == 0){
+    return(0)
+  }
+  
+  plotlist1 = list()
+  plotlist2 = list()
+  plotlist3 = list()
+  plotlist_counter = 1
+  
+  if(tonguePresence){
+    tongueMapped = tongueData %>% left_join(plaquemapping)
+    
+    plotlist1[[plotlist_counter]] = tongueData %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot() + ggtitle("Tongue")
+    plotlist2[[plotlist_counter]] = tongueData %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line() + ggtitle("Tongue")
+    plotlist3[[plotlist_counter]] = tongueMapped %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + geom_point() + ggtitle("Tongue")
+    plotlist_counter = plotlist_counter + 1
+    
+    maxPlaque = max(tongueMapped$Area_delta_R30)
+    
+    a = tongueMapped %>% filter(days == -14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day -14")
+    b = tongueMapped %>% filter(days == 0) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+    c = tongueMapped %>% filter(days == 2) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+    d = tongueMapped %>% filter(days == 5) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+    e = tongueMapped %>% filter(days == 9) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+    f = tongueMapped %>% filter(days == 14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+    g = tongueMapped %>% filter(days == 21) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 21")
+    plot = ggarrange(a,b,c,d,e,f,g, common.legend=TRUE)
+    ggsave(paste0(path,featureName,"_microbiome_","tongue_","timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Microbiome - ",featureName)), width=58, height=36, unit="cm")
+  }
+  
+  if(lowlingPresence){
+    lowlingMapped = lowlingData %>% left_join(plaquemapping)
+    
+    plotlist1[[plotlist_counter]] = lowlingData %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot() + ggtitle("Low ling")
+    plotlist2[[plotlist_counter]] = lowlingData %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line() + ggtitle("Low ling")
+    plotlist3[[plotlist_counter]] = lowlingMapped %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + geom_point() + ggtitle("Low ling")
+    plotlist_counter = plotlist_counter + 1
+    
+    maxPlaque = max(lowlingMapped$Area_delta_R30)
+    
+    a = lowlingMapped %>% filter(days == -14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day -14")
+    b = lowlingMapped %>% filter(days == 0) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+    c = lowlingMapped %>% filter(days == 2) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+    d = lowlingMapped %>% filter(days == 5) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+    e = lowlingMapped %>% filter(days == 9) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+    f = lowlingMapped %>% filter(days == 14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+    g = lowlingMapped %>% filter(days == 21) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 21")
+    plot = ggarrange(a,b,c,d,e,f,g, common.legend=TRUE)
+    ggsave(paste0(path,featureName,"_microbiome_","lowling_","timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Microbiome - ",featureName, " - Low ling")), width=58, height=36, unit="cm")
+  }
+  
+  if(lowinterPresence){
+    lowinterMapped = lowinterdata %>% left_join(plaquemapping)
+    
+    plotlist1[[plotlist_counter]] = lowinterdata %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot() + ggtitle("Low inter")
+    plotlist2[[plotlist_counter]] = lowinterdata %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line() + ggtitle("Low inter")
+    plotlist3[[plotlist_counter]] = lowinterMapped %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + geom_point() + ggtitle("Low inter")
+    plotlist_counter = plotlist_counter + 1
+    
+    maxPlaque = max(lowinterMapped$Area_delta_R30)
+    
+    a = lowinterMapped %>% filter(days == -14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day -14")
+    b = lowinterMapped %>% filter(days == 0) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+    c = lowinterMapped %>% filter(days == 2) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+    d = lowinterMapped %>% filter(days == 5) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+    e = lowinterMapped %>% filter(days == 9) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+    f = lowinterMapped %>% filter(days == 14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+    g = lowinterMapped %>% filter(days == 21) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 21")
+    plot = ggarrange(a,b,c,d,e,f,g, common.legend=TRUE)
+    ggsave(paste0(path,featureName,"_microbiome_","lowinter_","timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Microbiome - ",featureName, " - Low inter")), width=58, height=36, unit="cm")
+  }
+  
+  if(uplingPresence){
+    uplingMapped = uplingData %>% left_join(plaquemapping)
+    
+    plotlist1[[plotlist_counter]] = uplingData %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot() + ggtitle("Up ling")
+    plotlist2[[plotlist_counter]] = uplingData %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line() + ggtitle("Up ling")
+    plotlist3[[plotlist_counter]] = uplingMapped %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + geom_point() + ggtitle("Up ling")
+    plotlist_counter = plotlist_counter + 1
+    
+    maxPlaque = max(uplingMapped$Area_delta_R30)
+    
+    a = uplingMapped %>% filter(days == -14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day -14")
+    b = uplingMapped %>% filter(days == 0) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+    c = uplingMapped %>% filter(days == 2) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+    d = uplingMapped %>% filter(days == 5) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+    e = uplingMapped %>% filter(days == 9) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+    f = uplingMapped %>% filter(days == 14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+    g = uplingMapped %>% filter(days == 21) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 21")
+    plot = ggarrange(a,b,c,d,e,f,g, common.legend=TRUE)
+    ggsave(paste0(path,featureName,"_microbiome_","upling_","timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Microbiome - ",featureName," - Up ling")), width=58, height=36, unit="cm")
+  }
+  
+  if(upinterPresence){
+    upinterMapped = upinterData %>% left_join(plaquemapping)
+    
+    plotlist1[[plotlist_counter]] = upinterData %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot() + ggtitle("Up inter")
+    plotlist2[[plotlist_counter]] = upinterData %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line() + ggtitle("Up inter")
+    plotlist3[[plotlist_counter]] = upinterMapped %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + geom_point() + ggtitle("Up inter")
+    plotlist_counter = plotlist_counter + 1
+    
+    maxPlaque = max(upinterMapped$Area_delta_R30)
+    
+    a = upinterMapped %>% filter(days == -14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day -14")
+    b = upinterMapped %>% filter(days == 0) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+    c = upinterMapped %>% filter(days == 2) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+    d = upinterMapped %>% filter(days == 5) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+    e = upinterMapped %>% filter(days == 9) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+    f = upinterMapped %>% filter(days == 14) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+    g = upinterMapped %>% filter(days == 21) %>% ggplot(aes_string(x=featureName,y="Area_delta_R30",colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 21")
+    plot = ggarrange(a,b,c,d,e,f,g, common.legend=TRUE)
+    ggsave(paste0(path,featureName,"_microbiome_","upinter_","timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Microbiome - ",featureName," - Up inter")), width=58, height=36, unit="cm")
+  }
+  
+  ggsave(paste0(path,featureName,"_microbiome_boxplot",".png"), plot=ggarrange(plotlist=plotlist1, common.legend=TRUE), width=58, height=36, unit="cm")
+  ggsave(paste0(path,featureName,"_microbiome_lineplot",".png"), plot=ggarrange(plotlist=plotlist2, common.legend=TRUE), width=58, height=36, unit="cm")
+  ggsave(paste0(path,featureName,"_microbiome_plaqueoverview",".png"), plot=ggarrange(plotlist=plotlist3, common.legend=TRUE), width=58, height=36, unit="cm")
+    
+}
+
+quickInspect_metabolomics = function(featureName, metabolomicsData, path){
+  
+  if(!(featureName %in% metabolomics.features$KEGG | featureName %in% metabolomics.features$BIOCHEMICAL)){
+    return(0)
+  }
+  
+  if(str_starts(featureName, "C")){
+    featureName = metabolomics.features %>% filter(KEGG == featureName) %>% select(BIOCHEMICAL) %>% pull
+  }
+  colnames(metabolomicsData) = make.names(colnames(metabolomicsData))
+  metabolomicsMapped = metabolomicsData %>% left_join(plaquemapping)
+  featureName = make.names(featureName)
+  
+  a = metabolomicsData %>% ggplot(aes_string(x="days",y=featureName,fill="RFgroup")) + geom_boxplot()
+  b = metabolomicsMapped %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + geom_point()
+  ggsave(paste0(path,featureName,"_metabolomics_aggregatedOverview",".png"), plot=ggarrange(a,b, common.legend=TRUE), width=58, height=36, unit="cm")
+  
+  plot = metabolomicsData %>% ggplot(aes_string(x="days",y=featureName,group="subject",colour="RFgroup")) + geom_line()
+  ggsave(paste0(path,featureName,"_metabolomics_lineplot",".png"), plot=plot, width=58, height=36, unit="cm")
+  
+  maxPlaque = max(metabolomicsMapped$Area_delta_R30)
+  
+  a = metabolomicsMapped %>% filter(days==0) %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 0")
+  b = metabolomicsMapped %>% filter(days==2) %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 2")
+  c = metabolomicsMapped %>% filter(days==5) %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 5")
+  d = metabolomicsMapped %>% filter(days==9) %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 9")
+  e = metabolomicsMapped %>% filter(days==14) %>% ggplot(aes_string(x=featureName, y="Area_delta_R30", colour="RFgroup")) + ylim(0, maxPlaque) + geom_point() + ggtitle("Day 14")
+  plot = ggarrange(a,b,c,d,e, common.legend=TRUE)
+  ggsave(paste0(path,featureName,"_metabolomics_timeSeries",".png"), plot=annotate_figure(plot, top=paste0("Metabolomics - ",featureName)), width=58, height=36, unit="cm")
+  
+}
+```
+
+```{r Quick inspect - Two component system - Phosphate limitation}
+# Phosphate limitation
+path = "./Figures/Pathway analysis/Two-component system/Phosphate limitation/"
+quickInspect_metabolomics("phosphate", metabolomicsInput, path)
+quickInspect("K07636", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07657", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07658", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K01077", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+
+quickInspect("K07768", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07776", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02040", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07768", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Two component system - Quorum sensing}
+# Quorum sensing
+path = "./Figures/Pathway analysis/Two-component system/Quorum sensing/"
+quickInspect("K07645", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07666", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+
+```
+
+```{r Quick inspect - Two component system - Oxygen limitation}
+path = "./Figures/Pathway analysis/Two-component system/Oxygen limitation/"
+quickInspect("K07651", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07775", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02259", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Two component system - Temperature}
+path = "./Figures/Pathway analysis/Two-component system/Temperature/"
+quickInspect("K07652", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07668", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K00689", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Two component system - DNA replication}
+path = "./Figures/Pathway analysis/Two-component system/DNA replication/"
+quickInspect("K07654", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K07670", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02313", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Two component system - Pathogenesis}
+path = "./Figures/Pathway analysis/Two-component system/Pathogenesis/"
+quickInspect("K14982", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K14983", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - ABC transporters - Phosphate}
+path = "./Figures/Pathway analysis/ABC transporters/Phosphate/"
+quickInspect_metabolomics("C00009", metabolomicsInput, path)
+quickInspect("K02040", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02037", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02038", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02036", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - ABC transporters - Lipoprotein}
+path = "./Figures/Pathway analysis/ABC transporters/Lipoprotein/"
+quickInspect("K09808", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K09810", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - ABC transporters - Lipopolysaccharide}
+path = "./Figures/Pathway analysis/ABC transporters/Lipopolysaccharide/"
+quickInspect("K07091", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K11720", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K06861", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - ABC transporters - Oligopeptide}
+path = "./Figures/Pathway analysis/ABC transporters/Oligopeptide/"
+quickInspect("K15580", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K15581", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K15582", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K15583", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K10823", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+
+```{r Quick inspect - ABC transporters - Biotin}
+path = "./Figures/Pathway analysis/ABC transporters/Biotin/"
+quickInspect("K03523", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K16783", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K16784", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K03523", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K16785", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K16786", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K16787", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - Pyruvate}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/Pyruvate/"
+quickInspect_metabolomics("C00074", metabolomicsInput, path)
+quickInspect_metabolomics("C00022", metabolomicsInput, path)
+quickInspect("K08483", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02784", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K11183", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K23993", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02784", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - Fructose}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/Fructose/"
+quickInspect("K02770", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02769", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02768", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K00882", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - Glucose}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/Glucose/"
+quickInspect_metabolomics("C00031", metabolomicsInput, path)
+quickInspect("K02779", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02777", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K20118", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - Mannose}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/Mannose/"
+quickInspect("K02795", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02796", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02793", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - Maltose}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/Maltose/"
+quickInspect_metabolomics("C00208", metabolomicsInput, path)
+quickInspect_metabolomics("C00031", metabolomicsInput, path)
+quickInspect("K02791", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02777", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K20108", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Phosphotransferase system (PTS) - L-Ascorbate}
+path = "./Figures/Pathway analysis/Phosphotransferase system (PTS)/L-Ascorbate/"
+quickInspect("K03475", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02821", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02822", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Oxidative phosphorylation - F-type ATPase}
+path = "./Figures/Pathway analysis/Oxidative phosphorylation/F-type ATPase/"
+quickInspect("K02132", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02112", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02115", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02113", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02114", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02108", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02109", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K02110", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Oxidative phosphorylation - Pi}
+path = "./Figures/Pathway analysis/Oxidative phosphorylation/Pi/"
+quickInspect_metabolomics("C00009", metabolomicsInput, path)
+quickInspect("K01535", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K01507", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K15986", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K11725", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K11726", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K06019", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Oxidative phosphorylation - NADH}
+path = "./Figures/Pathway analysis/Oxidative phosphorylation/NADH/"
+quickInspect_metabolomics("C00003", metabolomicsInput, path)
+quickInspect("K03885", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Quick inspect - Oxidative phosphorylation - Succinate}
+path = "./Figures/Pathway analysis/Oxidative phosphorylation/Succinate/"
+quickInspect_metabolomics("C00042", metabolomicsInput, path)
+quickInspect_metabolomics("C00122", metabolomicsInput, path)
+quickInspect("K00234", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K00235", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+quickInspect("K00236", tongueFuncInput, lowlingFuncInput, lowinterFuncInput, uplingFuncInput, upinterFuncInput, path)
+```
+
+```{r Hypothesis testing function}
+plotHypothesis = function(df, variableName, timepoint){
+  dfMapped = df %>% left_join(plaquemapping)
+  
+  x = dfMapped %>% filter(days == timepoint) %>% select(variableName) %>% pull
+  y = dfMapped %>% filter(days == 14) %>% select(Area_delta_R30) %>% pull
+  
+  plotData = cbind(x,y) %>% as_tibble()
+  plotData$x = as.numeric(x)
+  plotData$y = as.numeric(y)
+  
+  plot = plotData %>% ggplot(aes(x=x,y=y)) + geom_point() + xlab(paste0(variableName, " at day ", timepoint)) + ylab("Plaque at day 14")
+  return(plot)
+}
+```
+
+```{r Test some hypotheses}
+plotHypothesis(tongueFuncInput, "K02108", 2)
+plotHypothesis(tongueFuncInput, "K02109", 2)
+plotHypothesis(tongueFuncInput, "K02110", 2)
+plotHypothesis(tongueFuncInput, "K02112", 2)
+plotHypothesis(tongueFuncInput, "K02113", 2)
+plotHypothesis(tongueFuncInput, "K02114", 2)
+plotHypothesis(tongueFuncInput, "K02115", 2)
+
+plotHypothesis(tongueFuncInput, "K07636", -14)
+
+plotHypothesis(metabolomicsInput, "caffeine", 2)
+
+```
+
+```{r Make feature importance boxplot for paper}
+tongueVarExps = (colSums(tongueModel[[6]]^2) / colSums(tongueModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=tongueModel[[2]]$asv, value=value/(sum(tongueModel[[6]]^2) / sum(tongueModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Tongue")
+lowlingVarExps = (colSums(lowlingModel[[6]]^2) / colSums(lowlingModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=lowlingModel[[2]]$asv, value=value/(sum(lowlingModel[[6]]^2) / sum(lowlingModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Lowling")
+lowinterVarExps = (colSums(lowinterModel[[6]]^2) / colSums(lowinterModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=lowinterModel[[2]]$asv, value=value/(sum(lowinterModel[[6]]^2) / sum(lowinterModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Lowinter")
+uplingVarExps = (colSums(uplingModel[[6]]^2) / colSums(uplingModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=uplingModel[[2]]$asv, value=value/(sum(uplingModel[[6]]^2) / sum(uplingModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Upling")
+upinterVarExps = (colSums(upinterModel[[6]]^2) / colSums(upinterModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=upinterModel[[2]]$asv, value=value/(sum(upinterModel[[6]]^2) / sum(upinterModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Upinter")
+salivaVarExps = (colSums(salivaModel[[6]]^2) / colSums(salivaModel[[7]]^2)) %>% as_tibble() %>% mutate(asv=salivaModel[[2]]$asv, value=value/(sum(salivaModel[[6]]^2) / sum(salivaModel[[7]]^2))) %>% left_join(taxa) %>% select(value, Genus) %>% mutate(niche="Saliva")
+
+rbind(tongueVarExps, lowlingVarExps, lowinterVarExps, uplingVarExps, upinterVarExps, salivaVarExps) %>% filter(Genus %in% c("Fusobacterium", "Leptotrichia", "Capnocytophaga", "Lachnoanaerobaculum", "Neisseria", "Porphyromonas")) %>% ggplot(aes(x=value,y=Genus,fill=niche)) + geom_boxplot() + geom_vline(xintercept=1, colour="red")
+```
+
+```{r another hypergeometric test function yay}
+homdData = read.csv("../Data/homd_result.csv") %>% as_tibble() %>% select(-X)
+
+genusGeomTest = function(model){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+  
+  var_exp_data = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(asv = colnames(input_data)) %>% left_join(taxa) 
+
+  numSuccesses = round(0.20 * length(var_exp_data$asv %>% unique))
+  #KOsuccess = var_exp_data %>% arrange(desc(value)) %>% select(value, asv) %>% unique()
+  #KOsuccess = KOsuccess[1:numSuccesses,] %>% as_tibble() %>% select(asv) %>% pull()
+  KOsuccess = var_exp_data %>% filter(value > totalVarExp) %>% select(asv) %>% pull()
+    
+  totalN = length(var_exp_data$asv %>% unique)
+  m = numSuccesses
+  n = totalN - m
+    
+  genusNames = unique(var_exp_data$Genus)
+  result = 1:length(genusNames)
+  for (j in 1:length(genusNames)){
+    genusName = genusNames[j]
+    df = var_exp_data %>% filter(Genus == genusName)
+    success = df %>% filter(asv %in% KOsuccess)
+    k = dim(df)[1]
+    q = dim(success)[1]
+    p = phyper(q, m, n, k)
+    result[j] = p
+    print(genusName)
+    print(df %>% select(value, asv, Genus) %>% mutate(success = asv %in% KOsuccess, p=p))
+  }
+
+  hyperGeomResult = cbind(genusNames, result) %>% as_tibble()
+  hyperGeomResult$result = as.numeric(hyperGeomResult$result)
+  colnames(hyperGeomResult) = c("pathway", "p-value")
+  return(hyperGeomResult)
+}
+
+homdGeomTest = function(model){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+  
+  var_exp_data = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(asv = colnames(input_data)) %>% left_join(homdData)
+
+  numSuccesses = round(0.20 * length(var_exp_data$asv %>% unique))
+  KOsuccess = var_exp_data %>% arrange(desc(value)) %>% select(value, asv) %>% unique()
+  KOsuccess = KOsuccess[1:numSuccesses,] %>% as_tibble() %>% select(asv) %>% pull()
+    
+  totalN = length(var_exp_data$asv %>% unique)
+  m = numSuccesses
+  n = totalN - m
+    
+  homdNames = unique(var_exp_data$homd)
+  result = 1:length(homdNames)
+  for (j in 1:length(homdNames)){
+    homdName = homdNames[j]
+    df = var_exp_data %>% filter(homd == homdName)
+    success = df %>% filter(asv %in% KOsuccess)
+    k = dim(df)[1]
+    q = dim(success)[1]
+    p = phyper(q, m, n, k)
+    result[j] = p
+  }
+
+  hyperGeomResult = cbind(homdNames, result) %>% as_tibble()
+  hyperGeomResult$result = as.numeric(hyperGeomResult$result)
+  colnames(hyperGeomResult) = c("pathway", "p-value")
+  return(hyperGeomResult)
+}
+
+speciesGeomTest = function(model){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+  
+  var_exp_data = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(asv = colnames(input_data)) %>% left_join(taxa) %>% mutate(name=paste0(Genus, " ", Species))
+
+  numSuccesses = round(0.20 * length(var_exp_data$asv %>% unique))
+  KOsuccess = var_exp_data %>% arrange(desc(value)) %>% select(value, asv) %>% unique()
+  KOsuccess = KOsuccess[1:numSuccesses,] %>% as_tibble() %>% select(asv) %>% pull()
+    
+  totalN = length(var_exp_data$asv %>% unique)
+  m = numSuccesses
+  n = totalN - m
+    
+  speciesNames = unique(var_exp_data$name)
+  result = 1:length(speciesNames)
+  for (j in 1:length(speciesNames)){
+    speciesName = speciesNames[j]
+    df = var_exp_data %>% filter(Genus == speciesName)
+    success = df %>% filter(asv %in% KOsuccess)
+    k = dim(df)[1]
+    q = dim(success)[1]
+    p = phyper(q, m, n, k)
+    result[j] = p
+  }
+
+  hyperGeomResult = cbind(speciesNames, result) %>% as_tibble()
+  hyperGeomResult$result = as.numeric(hyperGeomResult$result)
+  colnames(hyperGeomResult) = c("pathway", "p-value")
+  return(hyperGeomResult)
+}
+```
+
+```{r execution of hypergeometric test}
+genusGeomTest(tongueModel) %>% select("p-value") %>% pull %>% hist
+genusGeomTest(lowlingModel) %>% select("p-value") %>% pull %>% hist
+genusGeomTest(lowinterModel) %>% select("p-value") %>% pull %>% hist
+genusGeomTest(uplingModel) %>% select("p-value") %>% pull %>% hist
+genusGeomTest(upinterModel) %>% select("p-value") %>% pull %>% hist
+genusGeomTest(salivaModel) %>% select("p-value") %>% pull %>% hist
+```
+
+```{r homd level}
+homdGeomTest(tongueModel) %>% select("p-value") %>% pull %>% hist
+homdGeomTest(lowlingModel) %>% select("p-value") %>% pull %>% hist
+homdGeomTest(lowinterModel) %>% select("p-value") %>% pull %>% hist
+homdGeomTest(uplingModel) %>% select("p-value") %>% pull %>% hist
+homdGeomTest(upinterModel) %>% select("p-value") %>% pull %>% hist
+homdGeomTest(salivaModel) %>% select("p-value") %>% pull %>% hist
+```
+
+```{r species level}
+speciesGeomTest(tongueModel) %>% select("p-value") %>% pull %>% hist
+speciesGeomTest(lowlingModel) %>% select("p-value") %>% pull %>% hist
+speciesGeomTest(lowinterModel) %>% select("p-value") %>% pull %>% hist
+speciesGeomTest(uplingModel) %>% select("p-value") %>% pull %>% hist
+speciesGeomTest(upinterModel) %>% select("p-value") %>% pull %>% hist
+speciesGeomTest(salivaModel) %>% select("p-value") %>% pull %>% hist
+```
+
+```{r temp}
+homdData = read.csv("../Data/homd_result.csv") %>% as_tibble() %>% select(-X)
+
+compareGenusFreq = function(model, numPermutations){
+  modeled_data = model[[6]]
+  real_data = model[[7]]
+  
+  modelVarExp = sum(modeled_data^2) / sum(real_data^2)
+  featureVarExp = (colSums(modeled_data^2) / colSums(real_data^2)) %>% as_tibble() %>% mutate(asv = colnames(real_data)) %>% left_join(taxa) %>% filter(value > modelVarExp, Genus != "NA")
+  
+  N = nrow(featureVarExp)
+  genusNames = unique(featureVarExp$Genus)
+  
+  Z = 1:length(genusNames)
+  for(i in 1:length(genusNames)){
+    genusName = genusNames[i]
+    n = featureVarExp %>% filter(Genus == genusName) %>% nrow(.)
+    realFreq = n
+    
+    permFreqs = 1:numPermutations
+    for(j in 1:numPermutations){
+      permFreqs[j] = sum(taxa$Genus[sample(nrow(taxa), N, replace=F)] == genusName, na.rm=T)
+    }
+    lambda = var(permFreqs)
+    Z[i] = 1 - ppois(realFreq, lambda)
+  }
+  
+  result = cbind(Z, genusNames) %>% as_tibble()
+  return(result)
+}
+
+compareSpeciesFreq = function(model, numPermutations){
+  modeled_data = model[[6]]
+  real_data = model[[7]]
+  taxaNew = taxa %>% filter(Genus != "NA", Species != "NA") %>% mutate(name=paste0(Genus, " ", Species))
+  
+  modelVarExp = sum(modeled_data^2) / sum(real_data^2)
+  featureVarExp = (colSums(modeled_data^2) / colSums(real_data^2)) %>% as_tibble() %>% mutate(asv = colnames(real_data)) %>% left_join(taxa) %>% filter(value > modelVarExp, Genus != "NA", Species != "NA") %>% mutate(name=paste0(Genus, " ", Species))
+  
+  N = nrow(featureVarExp)
+  speciesNames = unique(featureVarExp$name)
+  
+  Z = 1:length(speciesNames)
+  for(i in 1:length(speciesNames)){
+    speciesName = speciesNames[i]
+    n = featureVarExp %>% filter(name == speciesName) %>% nrow(.)
+    realFreq = n
+    
+    permFreqs = 1:numPermutations
+    for(j in 1:numPermutations){
+      permFreqs[j] = sum(taxaNew$name[sample(nrow(taxaNew), N, replace=F)] == speciesName, na.rm=T)
+    }
+    lambda = var(permFreqs)
+    Z[i] = 1 - ppois(realFreq, lambda)
+  }
+  
+  result = cbind(Z, speciesNames) %>% as_tibble()
+  return(result)
+}
+
+a=compareGenusFreq(tongueModel, 100)
+b=compareGenusFreq(lowlingModel, 100)
+c=compareGenusFreq(lowinterModel, 100)
+d=compareGenusFreq(uplingModel, 100)
+e=compareGenusFreq(upinterModel, 100)
+f=compareGenusFreq(salivaModel, 100)
+
+g=compareSpeciesFreq(tongueModel, 100)
+h=compareSpeciesFreq(lowlingModel, 100)
+i=compareSpeciesFreq(lowinterModel, 100)
+j=compareSpeciesFreq(uplingModel, 100)
+k=compareSpeciesFreq(upinterModel, 100)
+l=compareSpeciesFreq(salivaModel, 100)
+
+genusList = unique(c(a$genusNames, b$genusNames, c$genusNames, d$genusNames, e$genusNames, f$genusNames)) %>% as_tibble()
+colnames(genusList) = "genusNames"
+
+genusList = genusList %>% left_join(a, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue")
+genusList = genusList %>% left_join(b, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue", "Lowling")
+genusList = genusList %>% left_join(c, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue", "Lowling", "Lowinter")
+genusList = genusList %>% left_join(d, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue", "Lowling", "Lowinter", "Upling")
+genusList = genusList %>% left_join(e, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue", "Lowling", "Lowinter", "Upling", "Upinter")
+genusList = genusList %>% left_join(f, by="genusNames")
+colnames(genusList) = c("genusNames", "Tongue", "Lowling", "Lowinter", "Upling", "Upinter", "Saliva")
+
+genusList = genusList %>% pivot_longer(-genusNames)
+genusList$value = as.numeric(genusList$value)
+a = genusList %>% mutate(`-log10(p-value)`=-1*log(value)) %>% ggplot(aes(x=name,y=genusNames,fill=`-log10(p-value)`)) + geom_tile() + ggtitle("Modeled genus per sampling location")
+
+speciesList = unique(c(g$speciesNames, h$speciesNames, i$speciesNames, j$speciesNames, k$speciesNames, l$speciesNames)) %>% as_tibble()
+colnames(speciesList) = "speciesNames"
+
+speciesList = speciesList %>% left_join(g, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue")
+speciesList = speciesList %>% left_join(h, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue", "Lowling")
+speciesList = speciesList %>% left_join(i, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue", "Lowling", "Lowinter")
+speciesList = speciesList %>% left_join(j, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue", "Lowling", "Lowinter", "Upling")
+speciesList = speciesList %>% left_join(k, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue", "Lowling", "Lowinter", "Upling", "Upinter")
+speciesList = speciesList %>% left_join(l, by="speciesNames")
+colnames(speciesList) = c("speciesNames", "Tongue", "Lowling", "Lowinter", "Upling", "Upinter", "Saliva")
+
+speciesList = speciesList %>% pivot_longer(-speciesNames)
+speciesList$value = as.numeric(speciesList$value)
+b = speciesList %>% mutate(`-log10(p-value)`=-1*log(value)) %>% ggplot(aes(x=name,y=speciesNames,fill=`-log10(p-value)`)) + geom_tile() + ggtitle("Modeled species per sampling location")
+
+ggarrange(a,b, common.legend=T)
+```
+
+```{r feature importance overview of metabolomics model}
+varExpComp1 = colSums(metabolomicsModel[[9]]^2) / colSums(metabolomicsModel[[7]]^2) %>% as_tibble()
+varExpComp2 = colSums(metabolomicsModel[[11]]^2) / colSums(metabolomicsModel[[7]]^2) %>% as_tibble()
+varExpTotal = colSums(metabolomicsModel[[6]]^2) / colSums(metabolomicsModel[[7]]^2) %>% as_tibble()
+varExpModel = sum(metabolomicsModel[[6]]^2) / sum(metabolomicsModel[[7]]^2)
+
+df = cbind(varExpComp1, varExpComp2, varExpTotal, metabolomicsModel[[2]]$BIOCHEMICAL)
+colnames(df) = c("Component_1", "Component_2", "Total", "Metabolite_name")
+df$Component_1 = df$Component_1 / max(df$Component_1)
+df$Component_2 = df$Component_2 / max(df$Component_2)
+df$Total = df$Total / max(df$Total)
+
+df %>% as_tibble() %>% filter(Total>0.5) %>% pivot_longer(-Metabolite_name) %>% ggplot(aes(x=Metabolite_name,y=name,fill=value)) + geom_tile() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r doing the likelihood test for the metabolomics}
+compareSuperFreq = function(model, modeled_data, numPermutations){
+  #modeled_data = model[[6]]
+  real_data = model[[7]]
+  
+  modelVarExp = sum(modeled_data^2) / sum(real_data^2)
+  featureVarExp = (colSums(modeled_data^2) / colSums(real_data^2)) %>% as_tibble() %>% mutate(BIOCHEMICAL = colnames(real_data)) %>% left_join(metabolomics.features) %>% filter(value > modelVarExp)
+  
+  N = nrow(featureVarExp)
+  superNames = unique(featureVarExp$SUPER_PATHWAY)
+  
+  Z = 1:length(superNames)
+  for(i in 1:length(superNames)){
+    superName = superNames[i]
+    n = featureVarExp %>% filter(SUPER_PATHWAY == superName) %>% nrow(.)
+    realFreq = n
+    
+    permFreqs = 1:numPermutations
+    for(j in 1:numPermutations){
+      permFreqs[j] = sum(metabolomics.features$SUPER_PATHWAY[sample(nrow(metabolomics.features), N, replace=F)] == superName, na.rm=T)
+    }
+    lambda = var(permFreqs)
+    Z[i] = 1 - ppois(realFreq, lambda)
+  }
+  
+  result = cbind(Z, superNames) %>% as_tibble()
+  return(result)
+}
+
+compareSubFreq = function(model, modeled_data, numPermutations){
+  #modeled_data = model[[6]]
+  real_data = model[[7]]
+  
+  modelVarExp = sum(modeled_data^2) / sum(real_data^2)
+  featureVarExp = (colSums(modeled_data^2) / colSums(real_data^2)) %>% as_tibble() %>% mutate(BIOCHEMICAL = colnames(real_data)) %>% left_join(metabolomics.features) %>% filter(value > modelVarExp)
+  
+  N = nrow(featureVarExp)
+  subNames = unique(featureVarExp$SUB_PATHWAY)
+  
+  Z = 1:length(subNames)
+  for(i in 1:length(subNames)){
+    subName = subNames[i]
+    n = featureVarExp %>% filter(SUB_PATHWAY == subName) %>% nrow(.)
+    realFreq = n
+    
+    permFreqs = 1:numPermutations
+    for(j in 1:numPermutations){
+      permFreqs[j] = sum(metabolomics.features$SUB_PATHWAY[sample(nrow(metabolomics.features), N, replace=F)] == subName, na.rm=T)
+    }
+    lambda = var(permFreqs)
+    Z[i] = 1 - ppois(realFreq, lambda)
+  }
+  
+  result = cbind(Z, subNames) %>% as_tibble() %>% mutate(Z = as.numeric(Z))
+  return(result)
+}
+
+superComp1 = compareSuperFreq(metabolomicsModel, metabolomicsModel[[9]], 1000)
+superComp2 = compareSuperFreq(metabolomicsModel, metabolomicsModel[[11]], 1000)
+superTotal = compareSuperFreq(metabolomicsModel, metabolomicsModel[[6]], 1000)
+
+df = superTotal %>% left_join(superComp1, by="superNames") %>% left_join(superComp2, by="superNames")
+colnames(df) = c("Total", "superNames", "Component_1", "Component_2")
+
+df = df %>% pivot_longer(-superNames) %>% mutate(value = as.numeric(value))
+df$value = df$value + min(df$value[df$value > 0])
+
+a = df %>% mutate(`-log10(p-value)`=-1*log(value)) %>% ggplot(aes(x=name,y=superNames,fill=`-log10(p-value)`)) + geom_tile()
+
+subComp1 = compareSubFreq(metabolomicsModel, metabolomicsModel[[9]], 1000)
+subComp2 = compareSubFreq(metabolomicsModel, metabolomicsModel[[11]], 1000)
+subTotal = compareSubFreq(metabolomicsModel, metabolomicsModel[[6]], 1000)
+
+df2 = subTotal %>% left_join(subComp1, by="subNames") %>% left_join(subComp2, by="subNames")
+colnames(df2) = c("Total", "subNames", "Component_1", "Component_2")
+
+df2 = df2 %>% pivot_longer(-subNames)
+b = df2 %>% mutate(`-log10(p-value)`=-1*log(value)) %>% ggplot(aes(x=name,y=subNames,fill=`-log10(p-value)`)) + geom_tile()
+
+ggarrange(a,b)
+
+```
+
+```{r checking loading distributions}
+allModels = list(tongueModel, lowlingModel, lowinterModel, uplingModel, upinterModel, salivaModel)
+modelNames = c("tongue", "lowling", "lowinter", "upling", "upinter", "saliva")
+
+ttest_loadings_subjects = function(model){
+  numComponents = ncol(model[[3]]) - 1
+  
+  for(i in 1:numComponents){
+    print(paste0("Component ",i))
+    loadings0 = model[[1]] %>% filter(RFgroup==0) %>% select(paste0("Component_",i)) %>% pull
+    loadings1 = model[[1]] %>% filter(RFgroup==1) %>% select(paste0("Component_",i)) %>% pull
+    loadings2 = model[[1]] %>% filter(RFgroup==2) %>% select(paste0("Component_",i)) %>% pull
+    
+    result = wilcox.test(loadings0, loadings1)$p.value
+    print(paste0("0 vs 1: ",result))
+    
+    result = wilcox.test(loadings1, loadings2)$p.value
+    print(paste0("1 vs 2: ",result))
+    
+    result = wilcox.test(loadings0, loadings2)$p.value
+    print(paste0("0 vs 2: ",result))
+  }
+}
+
+for(i in 1:length(allModels)){
+  modelName = modelNames[i]
+  print(modelName)
+  model = allModels[[i]]
+  ttest_loadings_subjects(model)
+}
+
+a = tongueModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Tongue") + xlab("Component") + ylab("Score")
+b = lowlingModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Low ling") + xlab("Component") + ylab("Score")
+c = lowinterModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Low inter") + xlab("Component") + ylab("Score")
+d = uplingModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Up ling") + xlab("Component") + ylab("Score")
+e = upinterModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Up inter") + xlab("Component") + ylab("Score")
+f = salivaModel[[1]] %>% pivot_longer(-c(subject,RFgroup)) %>% ggplot(aes(x=as.factor(name),y=value,fill=as.factor(RFgroup))) + geom_boxplot() + ggtitle("Saliva") + xlab("Component") + ylab("Score")
+
+ggarrange(a,b,c,d,e,f, common.legend=TRUE)
+```
+
+```{r a better way to check individual scores}
+allModels = list(tongueModel, lowlingModel, lowinterModel, uplingModel, upinterModel, salivaModel)
+modelNames = c("tongue", "lowling", "lowinter", "upling", "upinter", "saliva")
+
+varExpPerID = function(model){
+  modeled_data = model[[4]]
+  real_data = model[[5]]
+  
+  var_explained_per_id = rowSums(modeled_data^2) / rowSums(real_data^2) * 100
+  result = cbind(model[[1]]$subject, var_explained_per_id, model[[1]]$RFgroup) %>% as.data.frame() %>% as_tibble()
+  colnames(result) = c("subject", "varExp", "RFgroup")
+  result$varExp = as.numeric(result$varExp)
+  result$RFgroup = as.factor(result$RFgroup)
+  
+  return(result)
+}
+
+testScores = function(model){
+  result = varExpPerID(model)
+  loadings0 = result %>% filter(RFgroup==0) %>% select(varExp) %>% pull
+  loadings1 = result %>% filter(RFgroup==1) %>% select(varExp) %>% pull
+  loadings2 = result %>% filter(RFgroup==2) %>% select(varExp) %>% pull
+  
+  result = wilcox.test(loadings0, loadings1)$p.value
+  print(paste0("0 vs 1: ",result))
+    
+  result = wilcox.test(loadings1, loadings2)$p.value
+  print(paste0("1 vs 2: ",result))
+    
+  result = wilcox.test(loadings0, loadings2)$p.value
+  print(paste0("0 vs 2: ",result))
+}
+
+for(i in 1:length(allModels)){
+  modelName = modelNames[i]
+  print(modelName)
+  model = allModels[[i]]
+  testScores(model)
+}
+
+a = varExpPerID(tongueModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Tongue")
+b = varExpPerID(lowlingModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Lowling")
+c = varExpPerID(lowinterModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Lowinter")
+d = varExpPerID(uplingModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Upling")
+e = varExpPerID(upinterModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Upinter")
+f = varExpPerID(salivaModel) %>% ggplot(aes(x=RFgroup,y=varExp,fill=RFgroup)) + geom_boxplot() + ggtitle("Saliva")
+
+ggarrange(a,b,c,d,e,f, common.legend=TRUE)
+```
+
+```{r check time var exp}
+allModels = list(tongueModel, lowlingModel, lowinterModel, uplingModel, upinterModel, salivaModel)
+modelNames = c("tongue", "lowling", "lowinter", "upling", "upinter", "saliva")
+
+varExpPerTimepoint = function(model){
+  modeled_data = model[[4]]
+  real_data = model[[5]]
+  
+  result = 1:7
+  
+  for(i in 1:7){
+    modeled_timepoint = modeled_data %>% select(ends_with(paste0("_t", i)))
+    real_timepoint = real_data %>% select(ends_with(paste0("_t", i)))
+    varExp = sum(modeled_timepoint^2) / sum(real_timepoint^2) * 100
+    result[i] = varExp
+  }
+  
+  return(result)
+}
+
+a = varExpPerTimepoint(tongueModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Tongue")
+b = varExpPerTimepoint(lowlingModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Lowling")
+c = varExpPerTimepoint(lowinterModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Lowinter")
+d = varExpPerTimepoint(uplingModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Upling")
+e = varExpPerTimepoint(upinterModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Upinter")
+f = varExpPerTimepoint(salivaModel) %>% as_tibble() %>% mutate(intervention = c(FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,FALSE)) %>% ggplot(aes(x=1:7,y=value,fill=intervention)) + geom_bar(stat="identity") + ggtitle("Saliva")
+
+ggarrange(a,b,c,d,e,f, common.legend=TRUE)
+```
+
+```{r check feature var exp}
+allModels = list(tongueModel, lowlingModel, lowinterModel, uplingModel, upinterModel, salivaModel)
+modelNames = c("tongue", "lowling", "lowinter", "upling", "upinter", "saliva")
+
+varExpPerFeature = function(model){
+  featureMetadata = model[[2]]
+  modeled_data = model[[6]]
+  real_data = model[[7]]
+  
+  var_explained_per_asv = colSums(modeled_data^2) / colSums(real_data^2) * 100
+  
+  result = cbind(var_explained_per_asv, featureMetadata$Phylum) %>% as.data.frame()
+  colnames(result) = c("varExp", "phylum")
+  result$varExp = as.numeric(result$varExp)
+  result$phylum = as.factor(result$phylum)
+  result = result[order(result$phylum), ]
+  
+  return(result)
+}
+
+a = varExpPerFeature(tongueModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Tongue")
+b = varExpPerFeature(lowlingModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Lowling")
+c = varExpPerFeature(lowinterModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Lowinter")
+d = varExpPerFeature(uplingModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Upling")
+e = varExpPerFeature(upinterModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Upinter")
+f = varExpPerFeature(salivaModel) %>% ggplot(aes(x=1:nrow(.),y=varExp,fill=phylum)) + geom_bar(stat="identity") + ggtitle("Saliva")
+
+ggarrange(a,b,c,d,e,f)
+
+g = varExpPerFeature(tongueModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Tongue")
+h = varExpPerFeature(lowlingModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Lowling")
+i = varExpPerFeature(lowinterModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Lowinter")
+j = varExpPerFeature(uplingModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Upling")
+k = varExpPerFeature(upinterModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Upinter")
+l = varExpPerFeature(salivaModel) %>% ggplot(aes(x=phylum,y=varExp)) + geom_boxplot() + ggtitle("Saliva")
+
+ggarrange(g,h,i,j,k,l)
+```

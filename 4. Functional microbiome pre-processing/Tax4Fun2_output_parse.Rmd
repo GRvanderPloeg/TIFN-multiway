@@ -1,0 +1,145 @@
+---
+title: "Functional_output_parse"
+author: "Roel van der Ploeg"
+date: "05/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+
+wd <- "."
+setwd(wd)
+```
+
+```{r load data and fix header}
+path = "../1. Tax4Fun2/TIFN_Tax4Fun2_rarefied_10k/functional_prediction.txt"
+input_df = readRDS("../1. Tax4Fun2/TIFN_Tax4Fun2_rarefied_annotated_10k.RDS") %>% as_tibble()
+input_df = input_df %>% select(sample,subject,visit,group,niche)
+input_df_indexed = input_df %>% mutate(consistent_index=1:nrow(.))
+output_df = read.csv(path, sep="\t", header=T) %>% as_tibble()
+
+#microbiome.raw = read.csv("../0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+#taxa = read.csv("../0. Raw data input/20221005_wp2/taxonomic-classification.tsv", sep="\t")
+#header = colnames(df)
+#fixedHeader = header %>% str_split_fixed("X", 2)
+#newHeader = c(header[1], fixedHeader[2:nrow(fixedHeader),2])
+#colnames(df) = newHeader
+
+ko2name = output_df[,c(1,ncol(output_df))]
+colnames(ko2name) = c("KO", "description")
+ko2name = ko2name %>% as_tibble()
+
+output_df = output_df %>% select(-KO, -description)
+```
+
+```{r Import red fluorescence data}
+rf_data = read.csv("../0. Raw data input/RFdata.csv")
+colnames(rf_data) = c("subject", "id", "fotonr", "day", "group", "RFgroup", "MQH", "SPS(tm)", "Area_delta_R30", "Area_delta_Rmax", "Area_delta_R30_x_Rmax", "gingiva_mean_R_over_G", "gingiva_mean_R_over_G_upper_jaw", "gingiva_mean_R_over_G_lower_jaw")
+rf_data = rf_data %>% as_tibble()
+
+rf_data[rf_data$subject == "VSTPHZ", 1] = "VSTPH2"
+rf_data[rf_data$subject == "D2VZH0", 1] = "DZVZH0"
+rf_data[rf_data$subject == "DLODNN", 1] = "DLODDN"
+rf_data[rf_data$subject == "O3VQFX", 1] = "O3VQFQ"
+rf_data[rf_data$subject == "F80LGT", 1] = "F80LGF"
+rf_data[rf_data$subject == "26QQR0", 1] = "26QQrO"
+
+rf_data2 = read.csv("../0. Raw data input/red_fluorescence_data.csv") %>% as_tibble()
+rf_data2 = rf_data2[,c(2,4,181:192)]
+rf_data = rf_data %>% left_join(rf_data2)
+
+rf = rf_data %>% select(subject, RFgroup) %>% unique()
+```
+
+```{r define niche samples}
+tongueSelection = input_df_indexed %>% filter(niche == "tongue") %>% select(consistent_index) %>% pull()
+lowlingSelection = input_df_indexed %>% filter(niche == "lower jaw, lingual") %>% select(consistent_index) %>% pull()
+lowinterSelection = input_df_indexed %>% filter(niche == "lower jaw, interproximal") %>% select(consistent_index) %>% pull()
+uplingSelection = input_df_indexed %>% filter(niche == "upper jaw, lingual") %>% select(consistent_index) %>% pull()
+upinterSelection = input_df_indexed %>% filter(niche == "upper jaw, interproximal") %>% select(consistent_index) %>% pull()
+salivaSelection = input_df_indexed %>% filter(niche == "saliva") %>% select(consistent_index) %>% pull()
+```
+
+```{r split functional dataset by niche}
+tongueFunc = output_df[,tongueSelection] %>% as_tibble()
+lowlingFunc = output_df[,lowlingSelection] %>% as_tibble()
+lowinterFunc = output_df[,lowinterSelection] %>% as_tibble()
+uplingFunc = output_df[,uplingSelection] %>% as_tibble()
+upinterFunc = output_df[,upinterSelection] %>% as_tibble()
+salivaFunc = output_df[,salivaSelection] %>% as_tibble()
+```
+
+```{r new approach}
+wrangle2 = function(df, samplingSite, path){
+  dataOutput = t(df) %>% as_tibble()
+  subjectOutput = input_df %>% filter(niche==samplingSite)
+  featureOutput = ko2name
+
+  write.table(dataOutput, paste0(path, "_functional_analysis_raw.csv"), row.names=FALSE, col.names=FALSE)
+  write.table(featureOutput, paste0(path, "_functional_analysis_raw_features.csv"), row.names=FALSE, col.names=FALSE)
+  write.table(subjectOutput, paste0(path, "_functional_analysis_raw_subjects.csv"), row.names=FALSE, col.names=FALSE)
+}
+
+wrangle2(tongueFunc, "tongue", "./Tongue")
+wrangle2(lowlingFunc, "lower jaw, lingual", "./Lowling")
+wrangle2(lowinterFunc, "lower jaw, interproximal", "./Lowinter")
+wrangle2(uplingFunc, "upper jaw, lingual", "./Upling")
+wrangle2(upinterFunc, "upper jaw, interproximal", "./Upinter")
+wrangle2(salivaFunc, "saliva", "./Saliva")
+
+```
+
+```{r wrangle into correct format}
+wrangle = function(df, samplingSite, path){
+  df2 = t(df) %>% as_tibble()
+  colnames(df2) = ko2name$KO
+  metadata = input_df %>% filter(niche==samplingSite)
+  df2 = df2 %>% mutate(subject=metadata$subject, visit=metadata$visit)
+  
+  result = df2 %>% pivot_longer(-c(subject, visit)) %>% mutate(newname=paste0(name,"_t",visit)) %>% select(-visit,-name) %>% pivot_wider(names_from=newname) %>% arrange(subject)
+  
+  t1 = paste0(ko2name$KO, "_t1")
+  t2 = paste0(ko2name$KO, "_t2")
+  t3 = paste0(ko2name$KO, "_t3")
+  t4 = paste0(ko2name$KO, "_t4")
+  t5 = paste0(ko2name$KO, "_t5")
+  t6 = paste0(ko2name$KO, "_t6")
+  t7 = paste0(ko2name$KO, "_t7")
+  sortedColumns = c(t1,t2,t3,t4,t5,t6,t7)
+  
+  dataOutput = result %>% select(sortedColumns)
+  featureOutput = ko2name
+  subjectOutput = result %>% select(subject) %>% left_join(rf)
+  
+  write.table(dataOutput, paste0(path, "_functional_analysis_raw.csv"), row.names=FALSE, col.names=FALSE)
+  write.table(featureOutput, paste0(path, "_functional_analysis_raw_features.csv"), row.names=FALSE, col.names=FALSE)
+  write.table(subjectOutput, paste0(path, "_functional_analysis_raw_subjects.csv"), row.names=FALSE, col.names=FALSE)
+}
+
+wrangle(tongueFunc, "tongue", "./Tongue")
+wrangle(lowlingFunc, "lower jaw, lingual", "./Lowling")
+wrangle(lowinterFunc, "lower jaw, interproximal", "./Lowinter")
+wrangle(uplingFunc, "upper jaw, lingual", "./Upling")
+wrangle(upinterFunc, "upper jaw, interproximal", "./Upinter")
+wrangle(salivaFunc, "saliva", "./Saliva")
+```
+
+```{r OLD process saliva data separately}
+#path = "F:/PhD/Projects/Anna's tax4fun files/After saliva addition/Only saliva/functional_prediction.txt"
+#df = read.csv(path, sep="\t", header=T)
+#header = colnames(df)
+#fixedHeader = header %>% str_split_fixed("X", 2)
+#newHeader = c(header[1], fixedHeader[2:nrow(fixedHeader),2])
+#colnames(df) = newHeader
+
+#ko2name = df[,c(1,ncol(df))]
+#colnames(ko2name) = c("KO", "description")
+#ko2name = ko2name %>% as_tibble()
+
+#salivaSamples = microbiome.raw %>% as_tibble() %>% filter(niche == "saliva") %>% select(sample) %>% pull
+#salivaSelection = colnames(df) %in% salivaSamples
+#salivaSelection[1] = TRUE # correction for KO
+#salivaFunc = df[,salivaSelection] %>% as_tibble()
+#wrangle(salivaFunc, "../Matlab project/New functional data/Saliva")
+```

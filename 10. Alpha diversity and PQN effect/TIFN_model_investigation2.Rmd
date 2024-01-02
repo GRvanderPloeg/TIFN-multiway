@@ -1,0 +1,664 @@
+---
+title: "TIFN_integrated_analysis"
+author: "Roel van der Ploeg"
+date: "12/09/2022"
+output: html_document
+---
+
+## Requirements
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(ggpubr)
+library(asbio)
+
+source("../R scripts/summary.functions.R")
+source("../R scripts/PARAFAC_functions.R")
+set.seed(0)
+```
+
+## Data import
+
+```{r Import red fluorescence data}
+rf_data = read.csv("../0. Raw data input/RFdata.csv")
+colnames(rf_data) = c("subject", "id", "fotonr", "day", "group", "RFgroup", "MQH", "SPS(tm)", "Area_delta_R30", "Area_delta_Rmax", "Area_delta_R30_x_Rmax", "gingiva_mean_R_over_G", "gingiva_mean_R_over_G_upper_jaw", "gingiva_mean_R_over_G_lower_jaw")
+rf_data = rf_data %>% as_tibble()
+
+rf_data[rf_data$subject == "VSTPHZ", 1] = "VSTPH2"
+rf_data[rf_data$subject == "D2VZH0", 1] = "DZVZH0"
+rf_data[rf_data$subject == "DLODNN", 1] = "DLODDN"
+rf_data[rf_data$subject == "O3VQFX", 1] = "O3VQFQ"
+rf_data[rf_data$subject == "F80LGT", 1] = "F80LGF"
+rf_data[rf_data$subject == "26QQR0", 1] = "26QQrO"
+
+rf_data2 = read.csv("../0. Raw data input/red_fluorescence_data.csv") %>% as_tibble()
+rf_data2 = rf_data2[,c(2,4,181:192)]
+rf_data = rf_data %>% left_join(rf_data2)
+
+rf = rf_data %>% select(subject, RFgroup) %>% unique()
+```
+
+```{r Import subject metadata}
+age_gender = read.csv("../0. Raw data input/20160210 demografische gegevens TIFN2.csv", sep=";")
+age_gender = age_gender[2:nrow(age_gender),2:ncol(age_gender)]
+age_gender = age_gender %>% as_tibble() %>% filter(onderzoeksgroep == 0) %>% select(naam, leeftijd, geslacht)
+colnames(age_gender) = c("subject", "age", "gender")
+
+# Correction for incorrect subject ids
+age_gender[age_gender$subject == "VSTPHZ", 1] = "VSTPH2"
+age_gender[age_gender$subject == "D2VZH0", 1] = "DZVZH0"
+age_gender[age_gender$subject == "DLODNN", 1] = "DLODDN"
+age_gender[age_gender$subject == "O3VQFX", 1] = "O3VQFQ"
+age_gender[age_gender$subject == "F80LGT", 1] = "F80LGF"
+age_gender[age_gender$subject == "26QQR0", 1] = "26QQrO"
+
+age_gender = age_gender %>% arrange(subject)
+```
+
+```{r Import KO mappings}
+# Mapping of KO K-number to pathways
+KO2pathway = read.csv("../4. Functional microbiome pre-processing/kegg_ko2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(KO2pathway) = c("pathway", "KO")
+dummy = unlist(strsplit(KO2pathway["KO"] %>% pull, "ko:"))
+KO2pathway["KO"] = dummy[dummy != ""]
+
+# Mapping of pathway ID to pathway name
+pathway2name = read.csv("../4. Functional microbiome pre-processing/kegg_pathwayNames.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(pathway2name) = c("pathway", "name")
+#pathway2name2 = pathway2name
+#pathway2name2$pathway = str_replace(pathway2name$pathway, "map", "ko")
+
+# Mapping of compound to pathway
+compound2pathway = read.csv("../4. Functional microbiome pre-processing/kegg_compound2pathway.txt", sep="\t", header=FALSE) %>% as_tibble()
+colnames(compound2pathway) = c("pathway", "compound")
+dummy = unlist(strsplit(compound2pathway["compound"] %>% pull, "cpd:"))
+compound2pathway["compound"] = dummy[dummy != ""]
+```
+
+```{r import models}
+microb_featureNames = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "representative_sequence", "asv")
+metab_featureNames = c("SUPER_PATHWAY","SUB_PATHWAY","BIOCHEMICAL")
+microb_days = c(-14,0,2,5,9,14,21)
+metab_days = c(0,2,5,9,14)
+
+tongueModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Tongue", microb_featureNames, microb_days, "asv")
+lowlingModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Low_ling", microb_featureNames, microb_days, "asv")
+lowinterModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Low_inter", microb_featureNames, microb_days, "asv")
+uplingModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Up_ling", microb_featureNames, microb_days, "asv")
+upinterModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Up_inter", microb_featureNames, microb_days, "asv")
+salivaModel = importPARAFAC("../5. Microbiome modeling/20230705_run_robustCLR/PARAFAC models/Saliva", microb_featureNames, microb_days, "asv")
+
+metabolomicsModel = importPARAFAC("../6. Metabolome modeling/20230605_run/PARAFAC models/Metabolomics", metab_featureNames, metab_days, "BIOCHEMICAL")
+```
+
+
+```{r looking for id mode metadata explanation}
+mapMeta = function(model, age_gender, other_meta, title){
+  df = model[[1]]
+  df = df %>% left_join(age_gender) %>% left_join(other_meta %>% filter(day==14))
+
+  df$RFgroup[df$RFgroup == 0] = "low"
+  df$RFgroup[df$RFgroup == 1] = "mid"
+  df$RFgroup[df$RFgroup == 2] = "high"
+  
+  df$gender[df$gender == 1] = "male"
+  df$gender[df$gender == 2] = "female"
+  
+  df$RFgroup = as.factor(df$RFgroup)
+  df$gender = as.factor(df$gender)
+  
+  df$RF_gender = paste0(df$RFgroup, "_", df$gender) %>% as.factor()
+  
+  numComponents = dim(model[[1]])[2]-2
+  
+  if (numComponents == 2){
+    a = df %>% ggplot(aes(x=Component_1,y=Component_2,color=RFgroup)) + geom_point()
+    b = df %>% ggplot(aes(x=Component_1,y=Component_2,color=gender)) + geom_point()
+    c = df %>% ggplot(aes(x=Component_1,y=Component_2,color=age)) + geom_point() + scale_colour_gradient(low="blue",high="red")
+    d = df %>% ggplot(aes(x=Component_1,y=Component_2,color=bomppercent)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    e = df %>% ggplot(aes(x=Component_1,y=Component_2,color=plaquepercent)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    f = df %>% ggplot(aes(x=Component_1,y=Component_2,color=Area_delta_R30)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    g = df %>% ggplot(aes(x=Component_1,y=Component_2,color=RF_gender)) + geom_point()
+  }
+  else if (numComponents == 1){
+    a = df %>% ggplot(aes(x=Component_1,y=subject,fill=RFgroup)) + geom_bar(stat="identity")
+    b = df %>% ggplot(aes(x=Component_1,y=subject,fill=gender)) + geom_bar(stat="identity")
+    c = df %>% ggplot(aes(x=Component_1,y=subject,fill=age)) + geom_bar(stat="identity") + scale_colour_gradient(low="blue",high="red")
+    d = df %>% ggplot(aes(x=Component_1,y=bomppercent)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    e = df %>% ggplot(aes(x=Component_1,y=plaquepercent)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    f = df %>% ggplot(aes(x=Component_1,y=Area_delta_R30)) + geom_point() + scale_colour_gradient(low="blue",high="red") 
+    g = df %>% ggplot(aes(x=Component_1,y=subject,fill=RF_gender)) + geom_bar(stat="identity")
+  }
+
+  
+  plot = ggarrange(b,c,d,e,f,g, nrow=2, ncol=3)
+  annotate_figure(plot, top=text_grob(title))
+}
+```
+
+```{r check metadata of individual mode}
+mapMeta(tongueModel, age_gender, rf_data, "Tongue")
+mapMeta(lowlingModel, age_gender, rf_data, "Low ling")
+mapMeta(lowinterModel, age_gender, rf_data, "Low inter")
+mapMeta(uplingModel, age_gender, rf_data, "Up ling")
+mapMeta(upinterModel, age_gender, rf_data, "Up inter")
+mapMeta(metabolomicsModel, age_gender, rf_data, "Metabolomics")
+```
+
+```{r metabolomics versus dilutionFactor}
+calculateQuotients = function(df){
+  representativeSample = as.integer(as.numeric(apply(df, 2, median, na.rm=TRUE)))
+  result = matrix(0, nrow=nrow(df), ncol=ncol(df))
+  
+  for(i in 1:nrow(df)){
+    result[i,] = as.numeric(df[i,] / representativeSample)
+  }
+  
+  return(result)
+}
+
+determineDilutions = function(quotients){
+  result = apply(quotients, 1, function(x){median(x, na.rm=TRUE)})
+  return(result)
+}
+
+microbiome.raw = read.csv("../0. Raw data input/20221005_wp2/count-table.tsv", sep="\t")
+taxa = read.csv("../0. Raw data input/20221005_wp2/taxonomic-classification.tsv", sep="\t")
+selectedIndividuals = microbiome.raw %>% as_tibble() %>% filter(group == "control") %>% select(subject) %>% pull %>% unique
+metabolomics.raw = read.csv("../0. Raw data input/20221005_wp2/metabolomics.tsv", sep="\t")
+metabolomics.raw.notest = metabolomics.raw %>% as_tibble() %>% filter(subject %in% selectedIndividuals)
+metabolomics.features = read.csv("../0. Raw data input/20221005_wp2/metabolomics-features.tsv", sep="\t")
+metabolomics.raw.numeric = metabolomics.raw[,3:ncol(metabolomics.raw)]
+metabolomics.raw.numeric.notest = metabolomics.raw.notest[,3:ncol(metabolomics.raw.notest)]
+
+colnames(metabolomics.raw.numeric) = metabolomics.features$BIOCHEMICAL
+colnames(metabolomics.raw.numeric.notest) = metabolomics.features$BIOCHEMICAL
+
+metabolomics.raw.metadata = metabolomics.raw[,1:2]
+metabolomics.data.imp = metabolomics.raw.numeric
+metabolomics.imputed = metabolomics.data.imp
+detectionLimits = apply(metabolomics.raw.numeric, 2, function(x) min(x, na.rm=TRUE)) %>% as.numeric()
+
+for(i in 1:ncol(metabolomics.raw.numeric)) {
+  metabolomics.imputed[,i] = is.na(metabolomics.data.imp[,i])
+  metabolomics.data.imp[which(is.na(metabolomics.data.imp[,i])), i] = round(detectionLimits[i] * runif(1))
+}
+
+metabolomics.imputed = cbind(metabolomics.raw.metadata, metabolomics.imputed) %>% as_tibble()
+metabolomics.data.pqn = metabolomics.data.imp
+quotients = calculateQuotients(metabolomics.data.pqn)
+dilution = determineDilutions(quotients)
+
+a=metabolomics.raw.metadata %>% as_tibble() %>% mutate(dilutionFactor=dilution) %>% filter(subject %in% metabolomicsModel[[1]]$subject) %>% arrange(visit,subject) %>% select(subject, dilutionFactor) %>% group_by(subject) %>% summarize(Mean=mean(dilutionFactor, na.rm=TRUE)) %>% left_join(metabolomicsModel[[1]]) %>% ggplot(aes(x=Component_1,y=Mean)) + geom_point() + xlab("ID loadings comp 1") + ylab("Dilution factor") + ggtitle("Metabolomics - half PQN")
+
+b=metabolomics.raw.metadata %>% as_tibble() %>% mutate(dilutionFactor=dilution) %>% filter(subject %in% metabolomicsModel[[1]]$subject) %>% arrange(visit,subject) %>% select(subject, dilutionFactor) %>% group_by(subject) %>% summarize(Mean=mean(dilutionFactor, na.rm=TRUE)) %>% left_join(metabolomicsModel[[1]]) %>% ggplot(aes(x=Component_2,y=Mean)) + geom_point() + xlab("ID loadings comp 2") + ylab("Dilution factor") + ggtitle("Metabolomics - half PQN")
+
+ggarrange(a,b)
+```
+
+```{r microbiome versus alpha diversity and co}
+library(vegan)
+
+checkTotalCounts = function(model, nicheName)
+{
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric))
+  colnames(df.interpretation) = c("subject", "visit", "totalCounts")
+  df.interpretation = df.interpretation %>% group_by(subject) %>% summarize(meanTotalCounts=mean(totalCounts))
+  
+  if (ncol(model[[1]]) < 4){
+    model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=meanTotalCounts)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+      model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=Component_2,colour=meanTotalCounts)) + geom_point() + ggtitle(nicheName)
+  }
+
+}
+
+checkSparsity = function(model, niche)
+{
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-nicheName)
+  df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric==0)/ncol(df.raw.numeric))
+  colnames(df.interpretation) = c("subject", "visit", "sparsity")
+  df.interpretation = df.interpretation %>% group_by(subject) %>% summarize(meanSparsity=mean(sparsity))
+  
+  if (ncol(model[[1]]) < 4){
+    model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=meanSparsity)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+      model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=Component_2,colour=meanSparsity)) + geom_point() + ggtitle(nicheName)
+  }
+}
+
+checkRichness = function(model, nicheName)
+{
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric>0))
+  colnames(df.interpretation) = c("subject", "visit", "richness")
+  df.interpretation = df.interpretation %>% group_by(subject) %>% summarize(meanRichness=mean(richness))
+  
+  if (ncol(model[[1]]) < 4){
+    model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=meanRichness)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+      model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=Component_2,colour=meanRichness)) + geom_point() + ggtitle(nicheName)
+  }
+}
+
+checkAlphaDiv = function(model, nicheName)
+{
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, alpha.div(df.raw.numeric, index="simp"))
+  colnames(df.interpretation) = c("subject", "visit", "alphaDiversity")
+  df.interpretation = df.interpretation %>% group_by(subject) %>% summarize(meanAlphaDiversity=mean(alphaDiversity))
+  
+  if (ncol(model[[1]]) < 4){
+    model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=meanAlphaDiversity)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+      model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=Component_2,colour=meanAlphaDiversity)) + geom_point() + ggtitle(nicheName)
+  }
+}
+
+checkEvenness = function(model, nicheName)
+{
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, diversity(df.raw.numeric, index="shannon")/log(rowSums(df.raw.numeric>0)))
+  colnames(df.interpretation) = c("subject", "visit", "evenness")
+  df.interpretation = df.interpretation %>% group_by(subject) %>% summarize(meanEvenness=mean(evenness))
+  
+  if (ncol(model[[1]]) < 4){
+    model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=meanEvenness)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+      model[[1]] %>% left_join(df.interpretation) %>% ggplot(aes(x=Component_1,y=Component_2,colour=meanEvenness)) + geom_point() + ggtitle(nicheName)
+  }
+}
+
+a = checkTotalCounts(tongueModel, "Tongue")
+b = checkTotalCounts(lowlingModel, "Lower jaw, lingual")
+c = checkTotalCounts(lowinterModel, "Lower jaw, interproximal")
+d = checkTotalCounts(uplingModel, "Upper jaw, lingual")
+e = checkTotalCounts(upinterModel, "Upper jaw, interproximal")
+z1 = checkTotalCounts(salivaModel, "Saliva")
+plot1 = ggarrange(a,b,c,d,e,z1, common.legend=TRUE)
+annotate_figure(plot1, top="Total counts versus ID mode")
+
+f = checkSparsity(tongueModel, "Tongue")
+g = checkSparsity(lowlingModel, "Lower jaw, lingual")
+h = checkSparsity(lowinterModel, "Lower jaw, interproximal")
+i = checkSparsity(uplingModel, "Upper jaw, lingual")
+j = checkSparsity(upinterModel, "Upper jaw, interproximal")
+z2 = checkSparsity(salivaModel, "Saliva")
+plot2 = ggarrange(f,g,h,i,j,z2, common.legend=TRUE)
+annotate_figure(plot2, top="Sparsity versus ID mode")
+
+k = checkRichness(tongueModel, "Tongue")
+l = checkRichness(lowlingModel, "Lower jaw, lingual")
+m = checkRichness(lowinterModel, "Lower jaw, interproximal")
+n = checkRichness(uplingModel, "Upper jaw, lingual")
+o = checkRichness(upinterModel, "Upper jaw, interproximal")
+z3 = checkRichness(salivaModel, "Saliva")
+plot3 = ggarrange(k,l,m,n,o,z3, common.legend=TRUE)
+annotate_figure(plot3, top="Richness versus ID mode")
+
+p = checkAlphaDiv(tongueModel, "Tongue")
+q = checkAlphaDiv(lowlingModel, "Lower jaw, lingual")
+r = checkAlphaDiv(lowinterModel, "Lower jaw, interproximal")
+s = checkAlphaDiv(uplingModel, "Upper jaw, lingual")
+t = checkAlphaDiv(upinterModel, "Upper jaw, interproximal")
+z4 = checkAlphaDiv(salivaModel, "Saliva")
+plot4 = ggarrange(p,q,r,s,t,z4, common.legend=TRUE)
+annotate_figure(plot4, top="Alpha diversity versus ID mode")
+
+u = checkEvenness(tongueModel, "Tongue")
+v = checkEvenness(lowlingModel, "Lower jaw, lingual")
+w = checkEvenness(lowinterModel, "Lower jaw, interproximal")
+x = checkEvenness(uplingModel, "Upper jaw, lingual")
+y = checkEvenness(upinterModel, "Upper jaw, interproximal")
+z5 = checkEvenness(salivaModel, "Saliva")
+plot5 = ggarrange(u,v,w,x,y,z5, common.legend=TRUE)
+annotate_figure(plot5, top="Evenness versus ID mode")
+```
+
+```{r more explicit check of richness modelling}
+library(paramGUI)
+library(pracma)
+library(vegan)
+
+correctPARAFACloadings = function(model, modeToCorrect){
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  
+  if(modeToCorrect == 1){
+    F = kroneckercol(C, B) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Atilde = A %*% T
+    result = Atilde
+  }
+  else if(modeToCorrect == 2){
+    F = kroneckercol(A, C) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Btilde = B %*% T
+    result = Btilde
+  }
+  else if(modeToCorrect == 3){
+    F = kroneckercol(B, A) %>% as.matrix()
+    Ftilde = gramSchmidt(F)$Q
+    T = pinv(F) %*% Ftilde
+    Ctilde = C %*% T
+    result = Ctilde
+  }
+  
+  return(result)
+}
+
+checkRichness2 = function(model, nicheName)
+{
+  numComponents = ncol(model[[3]]) - 1
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric>0))
+  colnames(df.interpretation) = c("subject", "visit", "richness")
+  
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  F = kroneckercol(A,C)
+  Btilde = gramSchmidt(B)$Q
+  T = pinv(B) %*% Btilde
+  Ftilde = F %*% T
+  
+  Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]])))
+  
+  if(numComponents == 2){
+    colnames(Ftilde) = c("Component_1", "Component_2", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=Component_2,col=richness)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+    colnames(Ftilde) = c("Component_1", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=richness,)) + geom_point() + ggtitle(nicheName)
+  }
+  
+}
+
+checkEvenness2 = function(model, nicheName)
+{
+  numComponents = ncol(model[[3]]) - 1
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, diversity(df.raw.numeric, index="shannon")/log(rowSums(df.raw.numeric>0)))
+  colnames(df.interpretation) = c("subject", "visit", "evenness")
+  
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  F = kroneckercol(A,C)
+  Btilde = gramSchmidt(B)$Q
+  T = pinv(B) %*% Btilde
+  Ftilde = F %*% T
+  
+  Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]])))
+  
+  if(numComponents == 2){
+    colnames(Ftilde) = c("Component_1", "Component_2", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=Component_2,col=evenness)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+    colnames(Ftilde) = c("Component_1", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=evenness,)) + geom_point() + ggtitle(nicheName)
+  }
+  
+}
+
+checkAlphaDiv2 = function(model, nicheName)
+{
+  numComponents = ncol(model[[3]]) - 1
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, alpha.div(df.raw.numeric, index="simp"))
+  colnames(df.interpretation) = c("subject", "visit", "alphaDiversity")
+  
+  A = model[[1]] %>% select(starts_with("Component")) %>% as.matrix()
+  B = model[[2]] %>% select(starts_with("Component")) %>% as.matrix()
+  C = model[[3]] %>% select(starts_with("Component")) %>% as.matrix()
+  F = kroneckercol(A,C)
+  Btilde = gramSchmidt(B)$Q
+  T = pinv(B) %*% Btilde
+  Ftilde = F %*% T
+  
+  Ftilde = Ftilde %>% as_tibble() %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]])))
+  
+  if(numComponents == 2){
+    colnames(Ftilde) = c("Component_1", "Component_2", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=Component_2,col=alphaDiversity)) + geom_point() + ggtitle(nicheName)
+  }
+  else{
+    colnames(Ftilde) = c("Component_1", "subject", "visit")
+    plottableData = Ftilde %>% left_join(df.interpretation)
+    plottableData %>% ggplot(aes(x=Component_1,y=alphaDiversity)) + geom_point() + ggtitle(nicheName)
+  }
+  
+}
+
+a = checkRichness2(tongueModel, "tongue")
+b = checkRichness2(lowlingModel, "lower jaw, lingual")
+c = checkRichness2(lowinterModel, "lower jaw, interproximal")
+d = checkRichness2(uplingModel, "upper jaw, lingual")
+e = checkRichness2(upinterModel, "upper jaw, interproximal")
+f = checkRichness2(salivaModel, "saliva")
+plot1 = ggarrange(a,b,c,d,e,f)
+annotate_figure(plot1, top="Richness versus ID mode")
+
+g = checkEvenness2(tongueModel, "tongue")
+h = checkEvenness2(lowlingModel, "lower jaw, lingual")
+i = checkEvenness2(lowinterModel, "lower jaw, interproximal")
+j = checkEvenness2(uplingModel, "upper jaw, lingual")
+k = checkEvenness2(upinterModel, "upper jaw, interproximal")
+l = checkEvenness2(salivaModel, "saliva")
+plot2 = ggarrange(g,h,i,j,k,l)
+annotate_figure(plot2, top="Evenness versus ID mode")
+
+m = checkAlphaDiv2(tongueModel, "tongue")
+n = checkAlphaDiv2(lowlingModel, "lower jaw, lingual")
+o = checkAlphaDiv2(lowinterModel, "lower jaw, interproximal")
+p = checkAlphaDiv2(uplingModel, "upper jaw, lingual")
+q = checkAlphaDiv2(upinterModel, "upper jaw, interproximal")
+r = checkAlphaDiv2(salivaModel, "saliva")
+plot3 = ggarrange(m,n,o,p,q,r)
+annotate_figure(plot3, top="Alpha diversity versus ID mode")
+```
+
+```{r diagnostic - richness vs taxon mean}
+plotTeBeest2020Diagnostic = function(model, nicheName){
+  numFeatures = nrow(model[[2]])
+  
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  df.raw.metadata = df.raw %>% select(subject,visit)
+  df.raw.numeric = df.raw %>% select(-sample,-subject,-visit,-group,-niche)
+  df.interpretation = cbind(df.raw.metadata, rowSums(df.raw.numeric>0))
+  colnames(df.interpretation) = c("subject", "visit", "richness")
+  
+  df = model[[7]] %>% mutate(subject = rep(model[[1]]$subject, each=7), visit = rep(1:7, nrow(model[[1]]))) %>% left_join(df.interpretation)
+  
+  correlations = cor(df %>% select(-subject,-visit) %>% as.data.frame(), use="complete.obs")
+  richness_cor = correlations[1:numFeatures, ncol(correlations)]
+  log_taxon_mean = df.raw %>% select(model[[2]]$asv) %>% colMeans() %>% log10()
+  
+  plottableData = cbind(richness_cor, log_taxon_mean) %>% as_tibble()
+  
+  plottableData %>% ggplot(aes(x=log_taxon_mean,y=richness_cor)) + geom_point() + xlab("Log of taxon mean") + ylab("Correlation with richness") + ggtitle(nicheName)
+}
+
+PARAFACinfluence = function(model, nicheName){
+  df.raw = microbiome.raw %>% as_tibble() %>% filter(group=="control",niche==nicheName)
+  log_taxon_mean = df.raw %>% select(model[[2]]$asv) %>% colMeans() %>% log10()
+  
+  B = model[[2]] %>% select(starts_with("Component_")) %>% as.matrix()
+  influence = diag(B %*% inv(t(B)%*%B) %*% t(B))
+  
+  plottableData = cbind(influence, log_taxon_mean) %>% as_tibble()
+  
+  plottableData %>% ggplot(aes(x=log_taxon_mean,y=influence)) + geom_point() + xlab("Log of taxon mean") + ylab("Influence") + ggtitle(nicheName)
+}
+
+a = plotTeBeest2020Diagnostic(tongueModel, "tongue")
+b = plotTeBeest2020Diagnostic(lowlingModel, "lower jaw, lingual")
+c = plotTeBeest2020Diagnostic(lowinterModel, "lower jaw, interproximal")
+d = plotTeBeest2020Diagnostic(uplingModel, "upper jaw, lingual")
+e = plotTeBeest2020Diagnostic(upinterModel, "upper jaw, interproximal")
+f = plotTeBeest2020Diagnostic(salivaModel, "saliva")
+ggarrange(a,b,c,d,e,f)
+
+g = PARAFACinfluence(tongueModel, "tongue")
+h = PARAFACinfluence(lowlingModel, "lower jaw, lingual")
+i = PARAFACinfluence(lowinterModel, "lower jaw, interproximal")
+j = PARAFACinfluence(uplingModel, "upper jaw, lingual")
+k = PARAFACinfluence(upinterModel, "upper jaw, interproximal")
+l = PARAFACinfluence(salivaModel, "saliva")
+ggarrange(g,h,i,j,k,l)
+```
+
+```{r var exp of asvs in KO pathways}
+var_explained_per_asv_pathways_plot = function(modeled_data, real_data, title){
+  total_var_explained = sum(modeled_data^2) / sum(real_data^2) * 100
+  
+  var_explained_per_asv = colSums(modeled_data^2) / colSums(real_data^2) * 100
+  var_explained_per_asv = var_explained_per_asv %>% as_tibble() %>% mutate(asv=colnames(real_data)) %>% left_join(taxa) %>% mutate(name=paste0(Genus," ",Species)) %>% mutate(Phylum=as.factor(Phylum))
+  
+  plotData = var_explained_per_asv %>% arrange(desc(value)) %>% slice_head(n=20)
+  plotNames = plotData$name
+  
+  plotTitle = paste0(title, " (total var. exp. = ", signif(total_var_explained,2), "%)")
+  plotData %>% ggplot(aes(y=reorder(asv,value),x=value,fill=Phylum)) + geom_bar(stat="identity") + xlim(0,100) + ggtitle(plotTitle) + scale_y_discrete(label=rev(plotNames)) + ylab("Variable name") + xlab("Variance explained")                           
+}
+
+#unfinished
+
+```
+
+```{r var exp of metabolites in KO pathways}
+model = metabolomicsModel
+modeled_data = model[[6]]
+real_data = model[[7]]
+total_var_explained = sum(modeled_data^2) / sum(real_data^2) * 100
+var_explained_per_feature = colSums(modeled_data^2) / colSums(real_data^2) * 100
+
+varExp_feature = var_explained_per_feature %>% as_tibble() %>% mutate(BIOCHEMICAL=model[[2]]$BIOCHEMICAL) %>% left_join(metabolomics.features) %>% select(value, KEGG) %>% filter(KEGG != "NA")
+colnames(varExp_feature) = c("varExp", "compound")
+plotData = varExp_feature %>% left_join(compound2pathway) %>% filter(pathway != "NA") %>% left_join(pathway2name) %>% filter(name != "NA") %>% select(varExp, name) %>% unique()
+
+medianData = plotData %>% group_by(name) %>% summarize(Median = median(varExp, na.rm=TRUE))
+top20 = medianData %>% arrange(desc(Median)) %>% slice_head(n=20) %>% select(name) %>% pull
+
+plotTitle = paste0("Metabolomics", " (total var. exp. = ", signif(total_var_explained,2), "%)")
+plotData %>% filter(name %in% top20) %>% left_join(medianData) %>% select(name, Median) %>% unique() %>% ggplot(aes(x=Median,y=reorder(as.factor(name),Median))) + geom_bar(stat="identity") + ggtitle(plotTitle)
+
+```
+
+```{r Metabolomics - enrichment analysis}
+pathwayGeomTest = function(model){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  totalVarExp = sum(modeled_data^2) / sum(input_data^2)
+  
+  var_exp_data = (apply(modeled_data^2, 2, sum) / apply(input_data^2, 2, sum)) %>% as_tibble() %>% mutate(BIOCHEMICAL=model[[2]]$BIOCHEMICAL) %>% left_join(metabolomics.features) %>% select(value, KEGG) %>% filter(KEGG != "NA")
+  colnames(var_exp_data) = c("value", "compound")
+  var_exp_data = var_exp_data %>% left_join(compound2pathway) %>% filter(pathway != "NA") %>% left_join(pathway2name) %>% filter(name != "NA")
+  numSuccesses = round(0.2 * length(var_exp_data$compound %>% unique))
+  
+  KOsuccess = var_exp_data %>% arrange(desc(value)) %>% select(value, compound) %>% unique()
+  KOsuccess = KOsuccess[1:numSuccesses,] %>% as_tibble() %>% select(compound) %>% pull()
+  
+  totalN = length(var_exp_data$compound %>% unique)
+  m = numSuccesses
+  n = totalN - m
+  
+  pathwayNames = unique(var_exp_data$name)
+  result = 1:length(pathwayNames)
+  for (i in 1:length(pathwayNames)){
+    pathwayName = pathwayNames[i]
+    df = var_exp_data %>% filter(name == pathwayName)
+    success = df %>% filter(compound %in% KOsuccess)
+    k = dim(df)[1]
+    q = dim(success)[1]
+    p = phyper(q, m, n, k)
+    result[i] = p
+  }
+
+  hyperGeomResult = cbind(pathwayNames, result) %>% as_tibble()
+  hyperGeomResult$result = as.numeric(hyperGeomResult$result)
+  colnames(hyperGeomResult) = c("pathway", "p-value")
+  return(hyperGeomResult)
+}
+
+metabolomicsPathwayResult = pathwayGeomTest(metabolomicsModel)
+
+```
+
+```{r Make mapping of OTU to pathway}
+OTU2pathway.raw = read.csv("../../Anna's tax4fun files/pathway_per_OTU.txt", sep="\t")
+OTU2pathway = matrix(nrow=1,ncol=2)
+
+for(i in 1:nrow(OTU2pathway.raw)){
+  row = OTU2pathway.raw[i,]
+  ASVname = row[1,1]
+  pathways = colnames(OTU2pathway.raw)[row > 50]
+  pathways = pathways[2:length(pathways)]
+  
+  for(j in 1:length(pathways)){
+    item = c(ASVname, paste0("path:",pathways[j]))
+    OTU2pathway = rbind(OTU2pathway, item)
+  }
+}
+
+write.csv(OTU2pathway, "../Data/mapping_OTU2pathway2.csv")
+```
+
+```{r Temp make quick overview of one metabolite}
+plotCompound = function(model, compound){
+  modeled_data = model[[6]]
+  input_data = model[[7]]
+  
+  metadata_ids = rep(model[[1]]$subject, dim(model[[3]])[1])
+  metadata_timepoints = rep(model[[3]]$days, each=dim(model[[1]])[1])
+  metadata_rf = rep(model[[1]]$RFgroup, dim(model[[3]])[1])
+  
+  plotData = input_data %>% select(compound) %>% mutate(subject=metadata_ids,day=metadata_timepoints,RFgroup=metadata_rf)
+  plotData$day = as.factor(plotData$day)
+  plotData$RFgroup = as.factor(plotData$RFgroup)
+  a = plotData %>% ggplot(aes_string(x="day",y=compound,fill="RFgroup")) + geom_boxplot() + ggtitle("Input data")
+  
+  plotData = modeled_data %>% select(compound) %>% mutate(subject=metadata_ids,day=metadata_timepoints,RFgroup=metadata_rf)
+  plotData$day = as.factor(plotData$day)
+  plotData$RFgroup = as.factor(plotData$RFgroup)
+  b = plotData %>% ggplot(aes_string(x="day",y=compound,fill="RFgroup")) + geom_boxplot() + ggtitle("Modeled data")
+  plot=ggarrange(a,b, common.legend=TRUE)
+  annotate_figure(plot, top=compound)
+}
+
+plotCompound(metabolomicsModel, "glutamate")
+plotCompound(metabolomicsModel, "glycine")
+plotCompound(metabolomicsModel, "heme")
+plotCompound(metabolomicsModel, "threonine")
+```
